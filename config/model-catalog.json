@@ -1,0 +1,137 @@
+{
+  "catalog_version": "mh-catalog-2026-10-03-v1",
+  "reviewed_at": "2026-10-03T00:00:00Z",
+  "source_url": "https://docs.magichour.ai/api-reference/models",
+  "models": [
+    {
+      "id": "qwen-edit",
+      "label": "Draft",
+      "display_name": "Qwen Edit (Fast Draft)",
+      "media_kind": "image",
+      "provider_route": "ai-image-editor",
+      "minimum_tier": "free",
+      "allowed_tiers": ["free", "creator", "pro", "business"],
+      "allowed_resolutions": ["640px", "1k", "2k"],
+      "free_tier_resolutions": ["640px", "1k"],
+      "allowed_image_counts": [1],
+      "max_reference_images": 2,
+      "supports_audio": false,
+      "credit_formula": {
+        "type": "per_image_resolution",
+        "costs_by_resolution": {
+          "640px": 10,
+          "1k": 20,
+          "2k": 40
+        }
+      },
+      "source_url": "https://docs.magichour.ai/api-reference/image-projects/ai-image-editor",
+      "reviewed_at": "2026-10-03T00:00:00Z"
+    },
+    {
+      "id": "seedream-v4.5",
+      "label": "Presentation",
+      "display_name": "Seedream v4.5 (Balanced Preservation)",
+      "media_kind": "image",
+      "provider_route": "ai-image-editor",
+      "minimum_tier": "creator",
+      "allowed_tiers": ["creator", "pro", "business"],
+      "allowed_resolutions": ["640px", "1k", "2k", "4k"],
+      "free_tier_resolutions": [],
+      "allowed_image_counts": [1],
+      "max_reference_images": 9,
+      "supports_audio": false,
+      "credit_formula": {
+        "type": "per_image_resolution",
+        "costs_by_resolution": {
+          "640px": 50,
+          "1k": 50,
+          "2k": 100,
+          "4k": 200
+        }
+      },
+      "source_url": "https://docs.magichour.ai/api-reference/image-projects/ai-image-editor",
+      "reviewed_at": "2026-10-03T00:00:00Z"
+    },
+    {
+      "id": "gpt-image-2",
+      "label": "Presentation High Detail",
+      "display_name": "GPT Image 2 (Detailed Materials)",
+      "media_kind": "image",
+      "provider_route": "ai-image-editor",
+      "minimum_tier": "creator",
+      "allowed_tiers": ["creator", "pro", "business"],
+      "allowed_resolutions": ["640px", "1k", "2k", "4k"],
+      "free_tier_resolutions": [],
+      "allowed_image_counts": [1],
+      "max_reference_images": 9,
+      "supports_audio": false,
+      "credit_formula": {
+        "type": "per_image_resolution",
+        "costs_by_resolution": {
+          "640px": 50,
+          "1k": 50,
+          "2k": 100,
+          "4k": 200
+        }
+      },
+      "source_url": "https://docs.magichour.ai/api-reference/image-projects/ai-image-editor",
+      "reviewed_at": "2026-10-03T00:00:00Z"
+    },
+    {
+      "id": "ltx-2.5",
+      "label": "Draft",
+      "display_name": "LTX 2.5 (Fast Room Clip)",
+      "media_kind": "video",
+      "provider_route": "image-to-video",
+      "minimum_tier": "free",
+      "allowed_tiers": ["free", "creator", "pro", "business"],
+      "allowed_resolutions": ["480p", "720p", "1080p"],
+      "free_tier_resolutions": ["480p"],
+      "allowed_durations": [3, 4, 5, 6, 7, 8, 9, 10],
+      "supports_audio": true,
+      "audio_extra_credits_per_second": {
+        "480p": 0,
+        "720p": 0,
+        "1080p": 0
+      },
+      "credit_formula": {
+        "type": "per_second_resolution",
+        "credits_per_second": {
+          "480p": 24,
+          "720p": 48,
+          "1080p": 72
+        }
+      },
+      "source_url": "https://docs.magichour.ai/api-reference/video-projects/image-to-video",
+      "reviewed_at": "2026-10-03T00:00:00Z"
+    },
+    {
+      "id": "kling-3.0",
+      "label": "Presentation",
+      "display_name": "Kling 3.0 (Presentation Room Clip)",
+      "media_kind": "video",
+      "provider_route": "image-to-video",
+      "minimum_tier": "creator",
+      "allowed_tiers": ["creator", "pro", "business"],
+      "allowed_resolutions": ["720p", "1080p", "4k"],
+      "free_tier_resolutions": [],
+      "allowed_durations": [3, 4, 5, 6, 7, 8, 9, 10],
+      "supports_audio": true,
+      "audio_extra_credits_per_second": {
+        "720p": 24,
+        "1080p": 24,
+        "4k": 48
+      },
+      "credit_formula": {
+        "type": "per_second_resolution",
+        "credits_per_second": {
+          "720p": 48,
+          "1080p": 72,
+          "4k": 240
+        }
+      },
+      "source_url": "https://docs.magichour.ai/api-reference/video-projects/image-to-video",
+      "reviewed_at": "2026-10-03T00:00:00Z"
+    }
+  ]
+}

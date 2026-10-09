@@ -1,0 +1,76 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: renopreview
+      POSTGRES_PASSWORD: renopreview_dev_password
+      POSTGRES_DB: renopreview
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U renopreview"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    environment:
+      APP_ENV: development
+      GATEWAY_MODE: mock
+      DATABASE_URL: postgresql://renopreview:renopreview_dev_password@postgres:5432/renopreview
+      REDIS_URL: redis://redis:6379/0
+      ASSET_BUCKET: /var/lib/renopreview/assets
+      SESSION_SIGNING_SECRET: dev-session-signing-secret-32bytes-min
+      CREDENTIAL_ENCRYPTION_KEY: dev-credential-encryption-key-32bytes
+      ACCOUNT_FINGERPRINT_SECRET: dev-account-fingerprint-secret-32bytes
+      MODEL_CATALOG_PATH: config/model-catalog.json
+    ports:
+      - "8000:8000"
+    volumes:
+      - asset_data:/var/lib/renopreview/assets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.worker
+    environment:
+      APP_ENV: development
+      GATEWAY_MODE: mock
+      DATABASE_URL: postgresql://renopreview:renopreview_dev_password@postgres:5432/renopreview
+      REDIS_URL: redis://redis:6379/0
+      ASSET_BUCKET: /var/lib/renopreview/assets
+      SESSION_SIGNING_SECRET: dev-session-signing-secret-32bytes-min
+      CREDENTIAL_ENCRYPTION_KEY: dev-credential-encryption-key-32bytes
+      ACCOUNT_FINGERPRINT_SECRET: dev-account-fingerprint-secret-32bytes
+      MODEL_CATALOG_PATH: config/model-catalog.json
+    volumes:
+      - asset_data:/var/lib/renopreview/assets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  asset_data:

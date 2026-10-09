@@ -1,0 +1,96 @@
+{
+  "version": "reno-benchmark-v1",
+  "fixtures": [
+    {
+      "id": "kitchen_cabinet_refresh",
+      "room_type": "kitchen",
+      "name": "Kitchen Cabinet & Counter Refresh",
+      "raw_text": "Paint the cabinets warm sage green, replace hardware with brushed brass pulls, and install white quartz countertops.",
+      "preserve": [
+        "Room footprint",
+        "Camera viewpoint",
+        "Doors",
+        "Windows",
+        "Island position",
+        "Appliance positions"
+      ],
+      "layout_mode": "preserve",
+      "expected_conflict": false,
+      "expected_keywords": ["sage green", "brass", "quartz"],
+      "motion_preset": "gentle_push"
+    },
+    {
+      "id": "living_room_oak_floor_paint",
+      "room_type": "living_room",
+      "name": "Living Room Oak Flooring & Alabaster Walls",
+      "raw_text": "Replace the flooring with wide-plank light white oak and paint the walls soft alabaster white.",
+      "preserve": [
+        "Room footprint",
+        "Camera viewpoint",
+        "Windows",
+        "Doors",
+        "Ceiling height"
+      ],
+      "layout_mode": "preserve",
+      "expected_conflict": false,
+      "expected_keywords": ["white oak", "alabaster"],
+      "motion_preset": "small_lateral"
+    },
+    {
+      "id": "bathroom_vanity_tile",
+      "room_type": "bathroom",
+      "name": "Bathroom Fluted Oak Vanity & Matte Black Fixtures",
+      "raw_text": "Update the vanity to fluted white oak with honed marble top and matte black faucet hardware.",
+      "preserve": [
+        "Room footprint",
+        "Camera viewpoint",
+        "Windows",
+        "Plumbing locations"
+      ],
+      "layout_mode": "preserve",
+      "expected_conflict": false,
+      "expected_keywords": ["fluted white oak", "marble", "matte black"],
+      "motion_preset": "nearly_still"
+    },
+    {
+      "id": "bedroom_linen_paint_flooring",
+      "room_type": "bedroom",
+      "name": "Primary Bedroom Warm Linen Walls",
+      "raw_text": "Paint walls warm linen beige and refinish hardwood floors in natural light oak.",
+      "preserve": [
+        "Room footprint",
+        "Camera viewpoint",
+        "Windows",
+        "Doors"
+      ],
+      "layout_mode": "preserve",
+      "expected_conflict": false,
+      "expected_keywords": ["linen", "light oak"],
+      "motion_preset": "gentle_push"
+    },
+    {
+      "id": "kitchen_island_lock_conflict",
+      "room_type": "kitchen",
+      "name": "Kitchen Island Removal Conflict Detection",
+      "raw_text": "Remove the kitchen island completely to open up the floor and paint cabinets navy blue.",
+      "preserve": [
+        "Room footprint",
+        "Island position",
+        "Windows"
+      ],
+      "layout_mode": "preserve",
+      "expected_conflict": true,
+      "expected_keywords": ["navy blue"],
+      "motion_preset": "gentle_push"
+    }
+  ],
+  "banned_embellishment_tokens": [
+    "8k",
+    "masterpiece",
+    "award-winning",
+    "trending on artstation",
+    "unreal engine",
+    "hyperrealistic",
+    "octane render"
+  ]
+}

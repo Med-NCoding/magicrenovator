@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Builds
+dist/
+.vercel/
+
+# Private local data & env
+.env
+.local_private_assets/
+.test_private_assets/
+*.log
+.DS_Store
