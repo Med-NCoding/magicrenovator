@@ -69,20 +69,34 @@ export function ProjectWorkspace() {
       if (rm) {
         const brief = await apiClient.getLatestRoomBrief(rm.id);
         setActiveBrief(brief);
-        setActiveJobId(rm.latest_job_id || null);
-        if (rm.latest_job_id) {
+
+        const existingJobId =
+          (typeof window !== 'undefined' ? localStorage.getItem(`mr_active_job_${rm.id}`) : null) ||
+          rm.latest_job_id;
+
+        if (existingJobId) {
+          setActiveJobId((prev) => prev || existingJobId);
           try {
-            const snap = await apiClient.getGeneration(rm.latest_job_id);
-            setJobSnapshot(snap);
+            const storedProvId =
+              typeof window !== 'undefined' ? localStorage.getItem(`mr_provider_id_${existingJobId}`) || undefined : undefined;
+            const snap = await apiClient.getGeneration(existingJobId, {
+              provider_id: storedProvId,
+              room_id: rm.id,
+            });
+            setJobSnapshot((prev) => {
+              if (prev?.state === 'ready_for_review' && snap.state !== 'ready_for_review') return prev;
+              return snap;
+            });
+            if (snap.output_asset_url && typeof window !== 'undefined') {
+              localStorage.setItem(`mr_output_url_${rm.id}`, snap.output_asset_url);
+            }
             if (snap.state === 'rejected') {
               setIsRevisionQuoteActive(true);
               setHasEnteredQuoteFlow(true);
             }
           } catch {
-            // Ignore snapshot fetch error
+            // Keep existing state on transient transport glitch
           }
-        } else {
-          setJobSnapshot(null);
         }
       }
       return proj;
@@ -264,15 +278,37 @@ export function ProjectWorkspace() {
     setAutoQuoteNonce(0);
     setRevisionBanner(null);
     setActiveJobId(admission.job_id);
-    setJobSnapshot((prev) =>
-      prev
-        ? {
-            ...prev,
-            job_id: admission.job_id,
-            state: admission.state,
-          }
-        : null
-    );
+    if (activeRoom && typeof window !== 'undefined') {
+      localStorage.setItem(`mr_active_job_${activeRoom.id}`, admission.job_id);
+      if (admission.provider_id) {
+        localStorage.setItem(`mr_provider_id_${admission.job_id}`, admission.provider_id);
+      }
+    }
+    const initialKind = (admission.kind || selectedKind) as 'image' | 'video';
+    setJobSnapshot({
+      job_id: admission.job_id,
+      id: admission.job_id,
+      provider_id: admission.provider_id,
+      project_id: project?.id || 'default',
+      room_id: activeRoom?.id || 'default',
+      kind: initialKind,
+      state: 'queued',
+      provider_state: 'queued',
+      permitted_next_action: 'wait',
+      model: initialKind === 'image' ? 'qwen-edit' : 'kling-v1',
+      resolution: initialKind === 'image' ? '640px' : '480p',
+      output_asset_url: null,
+      events: [
+        {
+          sequence: 1,
+          job_id: admission.job_id,
+          state: 'queued',
+          safe_message: 'Job submitted to Magic Hour.',
+          timestamp: new Date().toISOString(),
+          payload: {},
+        },
+      ],
+    } as any);
     scrollToFlowTop();
   };
 
@@ -280,6 +316,9 @@ export function ProjectWorkspace() {
     async (snap: GenerationSnapshotResponse) => {
       const prevState = jobSnapshot?.state;
       setJobSnapshot(snap);
+      if (activeRoom && snap.output_asset_url && typeof window !== 'undefined') {
+        localStorage.setItem(`mr_output_url_${activeRoom.id}`, snap.output_asset_url);
+      }
       if (snap.state === 'ready_for_review' || snap.state === 'accepted') {
         if (projectId) {
           try {
@@ -299,7 +338,7 @@ export function ProjectWorkspace() {
         }
       }
     },
-    [jobSnapshot?.state, projectId, roomId, reloadProjectAndRoomState, scrollToFlowTop, setConnectionState]
+    [jobSnapshot?.state, activeRoom, projectId, roomId, reloadProjectAndRoomState, scrollToFlowTop, setConnectionState]
   );
 
   const handleReviewed = async (review: ReviewResponse) => {
@@ -382,9 +421,13 @@ export function ProjectWorkspace() {
     );
   }
 
+  const storedOutputUrl =
+    typeof window !== 'undefined' && activeRoom ? localStorage.getItem(`mr_output_url_${activeRoom.id}`) : null;
+
   const rawStillCompareUrl =
     (jobSnapshot?.kind === 'image' && jobSnapshot.output_asset_url) ||
     activeRoom?.accepted_image_url ||
+    storedOutputUrl ||
     null;
 
   const stillAssetId =
@@ -458,8 +501,17 @@ export function ProjectWorkspace() {
       !stillCompareUrl
   );
 
+  const showReviewAndOutput = Boolean(
+    !isJobRunning &&
+      (jobSnapshot?.state === 'ready_for_review' ||
+        jobSnapshot?.state === 'accepted' ||
+        Boolean(stillCompareUrl) ||
+        Boolean(videoClipUrl))
+  );
+
   const shouldShowQuoteCard = Boolean(
     !isJobRunning &&
+      !showReviewAndOutput &&
       (!jobSnapshot ||
         isRevisionQuoteActive ||
         ['failed', 'stopped', 'blocked_credits', 'waiting_for_key'].includes(jobSnapshot.state) ||
@@ -470,11 +522,6 @@ export function ProjectWorkspace() {
   // Only show Step 1 (Upload Photo) and Step 2 (Brief Editor) before the user enters the quote/generation/review flow
   const showInitialSetup = Boolean(
     !activeJobId && !jobSnapshot && !isRevisionQuoteActive && !hasEnteredQuoteFlow
-  );
-
-  // Only show the generated output & review card when not in the quote step and not actively loading a job
-  const showReviewAndOutput = Boolean(
-    !isJobRunning && !shouldShowQuoteCard && jobSnapshot
   );
 
   const mediaSelectorCard = (
@@ -594,7 +641,18 @@ export function ProjectWorkspace() {
 
               {/* Active Loading Step: Generation Progress (only shown while job is running or failed/blocked) */}
               {activeJobId && (isJobRunning || !shouldShowQuoteCard) && (
-                <JobTimeline jobId={activeJobId} onJobUpdated={handleJobUpdated} />
+                <JobTimeline
+                  jobId={activeJobId}
+                  providerId={
+                    jobSnapshot?.provider_id ||
+                    (typeof window !== 'undefined'
+                      ? localStorage.getItem(`mr_provider_id_${activeJobId}`) || undefined
+                      : undefined)
+                  }
+                  kind={jobSnapshot?.kind || selectedKind}
+                  roomId={activeRoom.id}
+                  onJobUpdated={handleJobUpdated}
+                />
               )}
 
               {/* Review & Approved Step: Shown right in front of the user when ready_for_review or accepted */}

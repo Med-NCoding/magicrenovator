@@ -840,7 +840,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
                 Accept: 'application/json'
               },
               body: JSON.stringify({
-                name: `MR_${Date.now()}`,
+                name: `MR_${jobId}`,
                 model: modelToUse,
                 resolution: reqResolution,
                 style: { prompt },
@@ -857,7 +857,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
                 Accept: 'application/json'
               },
               body: JSON.stringify({
-                name: `MR_${Date.now()}`,
+                name: `MR_${jobId}`,
                 model: modelToUse,
                 resolution: reqResolution,
                 end_seconds: 5,
@@ -889,6 +889,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           };
           jobsStore.set(jobId, job);
 
+          const room = roomsStore.get(targetRoomId);
+          if (room) {
+            room.latest_job_id = jobId;
+          }
+
           res.setHeader('Set-Cookie', [
             `mr_last_job=${jobId}:${mhData.id}:${isVideo ? 'video' : 'image'}:${targetRoomId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7200`,
             `mr_job_${jobId}=${mhData.id}:${isVideo ? 'video' : 'image'}:${targetRoomId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7200`
@@ -897,8 +902,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           return sendJson(res, 200, {
             job_id: jobId,
             id: jobId,
+            provider_id: mhData.id,
+            room_id: targetRoomId,
+            kind: isVideo ? 'video' : 'image',
             state: 'queued',
-            status_route: `/api/generations/${jobId}`,
+            status_route: `/api/generations/${jobId}?provider_id=${encodeURIComponent(mhData.id)}&kind=${isVideo ? 'video' : 'image'}&room_id=${encodeURIComponent(targetRoomId)}`,
             events_route: `/api/generations/${jobId}/events`,
             quote_id: body.quote_id || `quo_${jobId}`,
             idempotency_key: body.idempotency_key || `idemp_${jobId}`,
@@ -915,7 +923,28 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         let job = jobsStore.get(jobId);
         const key = extractKey(req);
 
-        // Fallback for serverless cold start: check cookie or look up project from Magic Hour
+        const queryProviderId = urlObj.searchParams.get('provider_id');
+        const queryKind = urlObj.searchParams.get('kind') as 'image' | 'video' | null;
+        const queryRoomId = urlObj.searchParams.get('room_id');
+
+        // Priority 1: Direct query param from client (immune to serverless cold starts)
+        if (!job && queryProviderId) {
+          const restoredJob: Job = {
+            id: jobId,
+            provider_id: queryProviderId,
+            project_id: 'default',
+            room_id: queryRoomId || 'default',
+            kind: queryKind === 'video' ? 'video' : 'image',
+            state: 'rendering',
+            provider_state: 'rendering',
+            prompt: 'modern bright renovated interior',
+            created_at: new Date().toISOString()
+          };
+          job = restoredJob;
+          jobsStore.set(jobId, restoredJob);
+        }
+
+        // Priority 2: Fallback for serverless cold start: check cookie or look up project from Magic Hour
         if (!job && key) {
           const cookieHeader = req.headers.cookie || '';
           let match = cookieHeader.match(new RegExp(`mr_job_${jobId}=([^;]+)`));
@@ -956,7 +985,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
             }
           }
 
-          // If still not found, search recent projects on Magic Hour directly
+          // Priority 3: Search Magic Hour projects matching MR_${jobId}
           if (!job) {
             try {
               const listRes = await fetch('https://api.magichour.ai/v1/image-projects', {
@@ -966,7 +995,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
                 const listData = await listRes.json();
                 const found = (listData.items || []).find(
                   (p: any) => p.name?.includes(jobId) || p.id === jobId || `MR_${jobId}` === p.name
-                ) || (listData.items || [])[0];
+                );
                 if (found) {
                   const foundJob: Job = {
                     id: jobId,
@@ -1030,6 +1059,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
                   const room = roomsStore.get(job.room_id);
                   if (room) {
+                    room.latest_job_id = job.id;
                     if (job.kind === 'image') {
                       room.accepted_image_url = downloadUrl;
                       room.accepted_image_asset_id = outputAssetId;

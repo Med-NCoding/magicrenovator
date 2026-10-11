@@ -206,11 +206,16 @@ export interface QuoteResponse {
 
 export interface GenerationAdmissionResponse {
   job_id: string;
+  id?: string;
+  provider_id?: string;
+  room_id?: string;
+  kind?: 'image' | 'video';
   state: JobState;
   status_route: string;
   events_route: string;
   quote_id: string;
   idempotency_key: string;
+  safe_message?: string;
 }
 
 export interface JobEventRecord {

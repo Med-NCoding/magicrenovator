@@ -287,8 +287,18 @@ export const apiClient = {
     return response.json();
   },
 
-  async getGeneration(jobId: string): Promise<GenerationSnapshotResponse> {
-    return requestJson<GenerationSnapshotResponse>(`/api/generations/${encodeURIComponent(jobId)}`);
+  async getGeneration(
+    jobId: string,
+    options?: { provider_id?: string; kind?: string; room_id?: string }
+  ): Promise<GenerationSnapshotResponse> {
+    let url = `/api/generations/${encodeURIComponent(jobId)}`;
+    const params = new URLSearchParams();
+    if (options?.provider_id) params.set('provider_id', options.provider_id);
+    if (options?.kind) params.set('kind', options.kind);
+    if (options?.room_id) params.set('room_id', options.room_id);
+    const q = params.toString();
+    if (q) url += `?${q}`;
+    return requestJson<GenerationSnapshotResponse>(url);
   },
 
   async resumeGeneration(

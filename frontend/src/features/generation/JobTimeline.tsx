@@ -4,6 +4,9 @@ import { GenerationSnapshotResponse } from '../../api/types';
 
 interface JobTimelineProps {
   jobId: string;
+  providerId?: string;
+  kind?: string;
+  roomId?: string;
   onJobUpdated: (snapshot: GenerationSnapshotResponse) => void;
 }
 
@@ -17,15 +20,31 @@ const ACTIVE_STATES = new Set([
   'polling_provider',
 ]);
 
-export function JobTimeline({ jobId, onJobUpdated }: JobTimelineProps) {
+export function JobTimeline({ jobId, providerId, kind, roomId, onJobUpdated }: JobTimelineProps) {
   const [snapshot, setSnapshot] = useState<GenerationSnapshotResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmNotInDashboard, setConfirmNotInDashboard] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [secondsElapsed, setSecondsElapsed] = useState(0);
+
+  useEffect(() => {
+    const start = Date.now();
+    const interval = window.setInterval(() => {
+      setSecondsElapsed(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [jobId]);
 
   const fetchSnapshot = async () => {
     try {
-      const snap = await apiClient.getGeneration(jobId);
+      const storedProvId =
+        providerId ||
+        (typeof window !== 'undefined' ? localStorage.getItem(`mr_provider_id_${jobId}`) || undefined : undefined);
+      const snap = await apiClient.getGeneration(jobId, {
+        provider_id: storedProvId,
+        kind,
+        room_id: roomId,
+      });
       setSnapshot(snap);
       onJobUpdated(snap);
       return snap;
@@ -49,12 +68,12 @@ export function JobTimeline({ jobId, onJobUpdated }: JobTimelineProps) {
       if (snap) {
         consecutiveErrors = 0;
         if (ACTIVE_STATES.has(snap.state)) {
-          timer = window.setTimeout(pollLoop, 1500);
+          timer = window.setTimeout(pollLoop, 2000);
         }
       } else {
         consecutiveErrors++;
         if (consecutiveErrors <= 5) {
-          timer = window.setTimeout(pollLoop, 2000);
+          timer = window.setTimeout(pollLoop, 2500);
         }
       }
     };
@@ -64,7 +83,7 @@ export function JobTimeline({ jobId, onJobUpdated }: JobTimelineProps) {
       active = false;
       if (timer) window.clearTimeout(timer);
     };
-  }, [jobId]);
+  }, [jobId, providerId, kind, roomId]);
 
   const handleStop = async () => {
     setBusy(true);
@@ -135,6 +154,61 @@ export function JobTimeline({ jobId, onJobUpdated }: JobTimelineProps) {
           State: {snapshot.state}
         </span>
       </div>
+
+      {ACTIVE_STATES.has(snapshot.state) && (
+        <div
+          role="status"
+          style={{
+            marginTop: '16px',
+            padding: '16px',
+            borderRadius: '8px',
+            background: '#f8f9fa',
+            border: '1px solid #e2e8f0',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '14px',
+          }}
+        >
+          <div
+            style={{
+              width: '28px',
+              height: '28px',
+              borderRadius: '50%',
+              border: '3px solid #cbd5e1',
+              borderTopColor: '#2563eb',
+              animation: 'spin 1s linear infinite',
+              flexShrink: 0,
+            }}
+          />
+          <div>
+            <strong style={{ fontSize: '1rem', display: 'block', color: '#1e293b' }}>
+              {snapshot.state === 'queued'
+                ? 'Magic Hour Status: In Processing Queue…'
+                : 'Magic Hour Status: Actively Rendering Renovation…'}
+            </strong>
+            <p className="field-helper" style={{ margin: '2px 0 0 0' }}>
+              Running on Magic Hour AI · Elapsed: <strong>{secondsElapsed}s</strong>. Please keep this tab open — your renovated room will appear automatically!
+            </p>
+          </div>
+        </div>
+      )}
+
+      {(snapshot.state === 'ready_for_review' || snapshot.state === 'accepted') && (
+        <div
+          role="status"
+          style={{
+            marginTop: '16px',
+            padding: '14px 16px',
+            borderRadius: '8px',
+            background: '#ecfdf5',
+            border: '1px solid #a7f3d0',
+            color: '#065f46',
+            fontWeight: 600,
+          }}
+        >
+          Renovation complete! See your renovated concept and before/after comparison below.
+        </div>
+      )}
 
       {snapshot.brief_outdated && (
         <div
