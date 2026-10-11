@@ -24,6 +24,7 @@ interface Room {
   accepted_clip_url?: string | null;
   accepted_clip_review_id?: string | null;
   latest_job_id?: string | null;
+  file_path?: string | null;
 }
 
 interface Asset {
