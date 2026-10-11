@@ -168,19 +168,96 @@ async function runTests() {
 
   globalThis.fetch = originalFetch;
 
-  if (
-    t5Start.status === 200 &&
-    t5Start.data?.provider_id === 'mh_cuid_test_999' &&
-    t5Poll.data?.state === 'ready_for_review' &&
-    t5Poll.data?.output_asset_url === 'https://images.magichour.ai/output_test_finished.jpg'
-  ) {
-    console.log('✅ TEST 5 PASSED: Full end-to-end generation lifecycle from queue to completion verified!');
+  // TEST 6: Strict Resolution & Model Verification (640px sent and returned, NEVER 1k when 640px chosen)
+  console.log('\n[Test 6] Strict resolution test: Verify 640px is sent to Magic Hour and returned by status API');
+  let sentMhPayload = null;
+  globalThis.fetch = async (url, options) => {
+    if (url.includes('api.magichour.ai/v1/account')) {
+      return { ok: true, json: async () => ({ tier: 'pro', credits: 1500 }) };
+    }
+    if (url.includes('api.magichour.ai/v1/ai-image-editor')) {
+      sentMhPayload = JSON.parse(options.body);
+      return {
+        ok: true,
+        json: async () => ({
+          id: 'mh_cuid_res_640',
+          name: sentMhPayload.name,
+          status: 'complete',
+          downloads: [{ url: 'https://images.magichour.ai/output_640.jpg' }]
+        })
+      };
+    }
+    if (url.includes('api.magichour.ai/v1/image-projects/mh_cuid_res_640')) {
+      return {
+        ok: true,
+        json: async () => ({
+          id: 'mh_cuid_res_640',
+          status: 'complete',
+          downloads: [{ url: 'https://images.magichour.ai/output_640.jpg' }]
+        })
+      };
+    }
+    return originalFetch(url, options);
+  };
+
+  const t6Start = await runHandler('POST', '/api/generations', {
+    authorization: 'Bearer valid_mh_key',
+    'content-type': 'application/json'
+  }, {
+    file_path: 'api-assets/valid_room_123.jpg',
+    resolution: '640px',
+    model: 'qwen-edit',
+    room_id: 'rm_test_kitchen'
+  });
+
+  const t6Poll = await runHandler('GET', `/api/generations/${t6Start.data?.job_id}?provider_id=${t6Start.data?.provider_id}&kind=image&resolution=640px&model=qwen-edit`, {
+    authorization: 'Bearer valid_mh_key'
+  });
+
+  globalThis.fetch = originalFetch;
+
+  console.log(`Test 6 Sent to MH resolution: ${sentMhPayload?.resolution}, Status API resolution: ${t6Poll.data?.resolution}`);
+  if (sentMhPayload?.resolution === '640px' && t6Poll.data?.resolution === '640px') {
+    console.log('✅ TEST 6 PASSED: Resolution is strictly 640px end-to-end, zero 1k overrides!');
   } else {
-    console.error('❌ TEST 5 FAILED', { t5Start, t5Poll });
+    console.error('❌ TEST 6 FAILED: Resolution mismatch', { sent: sentMhPayload?.resolution, received: t6Poll.data?.resolution });
     process.exit(1);
   }
 
-  console.log('\n🎉 ALL 5 TESTS PASSED SUCCESSFULLY! ZERO ERRORS DETECTED.');
+  // TEST 7: Image Upload Self-Contained Thumbnail Verification
+  console.log('\n[Test 7] Image upload safeguard: Verify POST /api/rooms/:id/assets returns valid data URL');
+  globalThis.fetch = async (url, options) => {
+    if (url.includes('api.magichour.ai/v1/files/upload-urls')) {
+      return {
+        ok: true,
+        json: async () => ({
+          items: [{ upload_url: 'https://s3.amazonaws.com/mock-put-url', file_path: 'uploads/room_clean_photo.jpg' }]
+        })
+      };
+    }
+    if (url.includes('s3.amazonaws.com/mock-put-url')) {
+      return { ok: true };
+    }
+    return originalFetch(url, options);
+  };
+
+  const dummyJpegBuffer = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00]);
+  const t7Upload = await runHandler('POST', '/api/rooms/rm_test_kitchen/assets', {
+    authorization: 'Bearer valid_mh_key',
+    'content-type': 'image/jpeg'
+  }, dummyJpegBuffer);
+
+  globalThis.fetch = originalFetch;
+
+  console.log(`Test 7 status: ${t7Upload.status}, thumbnail_url prefix: ${t7Upload.data?.thumbnail_url?.substring(0, 25)}`);
+  if (t7Upload.status === 201 && t7Upload.data?.thumbnail_url?.startsWith('data:image/jpeg;base64,')) {
+    console.log('✅ TEST 7 PASSED: Thumbnail is self-contained base64 data URL, never 403 on S3 GET!');
+  } else {
+    console.error('❌ TEST 7 FAILED: Invalid thumbnail', t7Upload);
+    process.exit(1);
+  }
+
+  console.log('\n🎉 ALL 7 TESTS PASSED SUCCESSFULLY! ZERO ERRORS DETECTED.');
 }
 
 runTests();

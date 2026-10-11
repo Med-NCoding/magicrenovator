@@ -77,6 +77,8 @@ interface Job {
   kind: 'image' | 'video';
   state: 'queued' | 'rendering' | 'polling_provider' | 'ready_for_review' | 'failed' | 'stopped';
   provider_state: string;
+  model?: string;
+  resolution?: string;
   prompt: string;
   output_asset_id?: string | null;
   output_url?: string | null;
@@ -477,17 +479,19 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           });
 
           const assetId = `ast_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+          const mimeType = extension === 'png' ? 'image/png' : 'image/jpeg';
+          const previewDataUrl = `data:${mimeType};base64,${fileBytes.toString('base64')}`;
           const asset: Asset = {
             id: assetId,
             room_id: roomId,
             project_id: 'default',
             role: 'original_photo',
-            mime_type: extension === 'png' ? 'image/png' : 'image/jpeg',
+            mime_type: mimeType,
             bytes_size: fileBytes.length,
             width: 1280,
             height: 720,
-            thumbnail_url: firstItem.upload_url,
-            download_url: firstItem.upload_url,
+            thumbnail_url: previewDataUrl,
+            download_url: previewDataUrl,
             file_path: firstItem.file_path,
             created_at: new Date().toISOString()
           };
@@ -496,7 +500,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           const room = roomsStore.get(roomId);
           if (room) {
             room.primary_asset_id = assetId;
-            room.thumbnail_url = firstItem.upload_url;
+            room.thumbnail_url = previewDataUrl;
             room.file_path = firstItem.file_path;
           }
 
@@ -885,6 +889,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
             kind: isVideo ? 'video' : 'image',
             state: 'queued',
             provider_state: 'queued',
+            model: modelToUse,
+            resolution: reqResolution,
             prompt,
             created_at: new Date().toISOString()
           };
@@ -907,7 +913,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
             room_id: targetRoomId,
             kind: isVideo ? 'video' : 'image',
             state: 'queued',
-            status_route: `/api/generations/${jobId}?provider_id=${encodeURIComponent(mhData.id)}&kind=${isVideo ? 'video' : 'image'}&room_id=${encodeURIComponent(targetRoomId)}`,
+            model: modelToUse,
+            resolution: reqResolution,
+            status_route: `/api/generations/${jobId}?provider_id=${encodeURIComponent(mhData.id)}&kind=${isVideo ? 'video' : 'image'}&room_id=${encodeURIComponent(targetRoomId)}&resolution=${encodeURIComponent(reqResolution)}&model=${encodeURIComponent(modelToUse)}`,
             events_route: `/api/generations/${jobId}/events`,
             quote_id: body.quote_id || `quo_${jobId}`,
             idempotency_key: body.idempotency_key || `idemp_${jobId}`,
@@ -927,6 +935,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         const queryProviderId = urlObj.searchParams.get('provider_id');
         const queryKind = urlObj.searchParams.get('kind') as 'image' | 'video' | null;
         const queryRoomId = urlObj.searchParams.get('room_id');
+        const queryResolution = urlObj.searchParams.get('resolution');
+        const queryModel = urlObj.searchParams.get('model');
 
         // Priority 1: Direct query param from client (immune to serverless cold starts)
         if (!job && queryProviderId) {
@@ -936,6 +946,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
             project_id: 'default',
             room_id: queryRoomId || 'default',
             kind: queryKind === 'video' ? 'video' : 'image',
+            model: queryModel || (queryKind === 'video' ? 'kling-v1' : 'qwen-edit'),
+            resolution: queryResolution || (queryKind === 'video' ? '480p' : '640px'),
             state: 'rendering',
             provider_state: 'rendering',
             prompt: 'modern bright renovated interior',
@@ -943,6 +955,15 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           };
           job = restoredJob;
           jobsStore.set(jobId, restoredJob);
+        }
+
+        if (job) {
+          if (queryResolution && (!job.resolution || job.resolution === '1k')) {
+            job.resolution = queryResolution;
+          }
+          if (queryModel && !job.model) {
+            job.model = queryModel;
+          }
         }
 
         // Priority 2: Fallback for serverless cold start: check cookie or look up project from Magic Hour
@@ -1116,8 +1137,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           state: job.state,
           provider_state: job.provider_state,
           permitted_next_action: job.state === 'ready_for_review' ? 'review' : 'wait',
-          model: job.kind === 'image' ? 'qwen-edit' : 'kling-v1',
-          resolution: job.kind === 'image' ? '1k' : '720p',
+          model: job.model || (job.kind === 'image' ? 'qwen-edit' : 'kling-v1'),
+          resolution: job.resolution || (job.kind === 'image' ? '640px' : '480p'),
           source_asset_id: 'ast_default',
           source_asset_url: null,
           output_asset_id: job.output_asset_id || null,
@@ -1136,6 +1157,28 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
               ? 'Generation verified and ready for review.'
               : 'Rendering renovation on Magic Hour...'
         });
+      }
+    }
+
+    // 8. /api/proxy-image (Reliably stream image if direct S3 URL has CORS or header restrictions)
+    if (segments[0] === 'proxy-image' && method === 'GET') {
+      const targetUrl = urlObj.searchParams.get('url');
+      if (!targetUrl || !targetUrl.startsWith('http')) {
+        return sendError(res, 400, 'invalid_url', 'Missing or invalid image URL.');
+      }
+      try {
+        const upstream = await fetch(targetUrl);
+        if (!upstream.ok) {
+          return sendError(res, upstream.status, 'proxy_failed', 'Failed to retrieve image.');
+        }
+        const contentType = upstream.headers.get('content-type') || 'image/jpeg';
+        const buffer = Buffer.from(await upstream.arrayBuffer());
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        res.statusCode = 200;
+        return res.end(buffer);
+      } catch (err: any) {
+        return sendError(res, 502, 'proxy_error', `Proxy error: ${err.message}`);
       }
     }
 

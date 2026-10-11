@@ -40,10 +40,16 @@ export function JobTimeline({ jobId, providerId, kind, roomId, onJobUpdated }: J
       const storedProvId =
         providerId ||
         (typeof window !== 'undefined' ? localStorage.getItem(`mr_provider_id_${jobId}`) || undefined : undefined);
+      const storedRes =
+        (typeof window !== 'undefined' ? localStorage.getItem(`mr_resolution_${jobId}`) || undefined : undefined);
+      const storedModel =
+        (typeof window !== 'undefined' ? localStorage.getItem(`mr_model_${jobId}`) || undefined : undefined);
       const snap = await apiClient.getGeneration(jobId, {
         provider_id: storedProvId,
         kind,
         room_id: roomId,
+        resolution: storedRes,
+        model: storedModel,
       });
       setSnapshot(snap);
       onJobUpdated(snap);

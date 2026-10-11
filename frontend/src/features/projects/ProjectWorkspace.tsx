@@ -147,9 +147,27 @@ export function ProjectWorkspace() {
 
   const handleUploadPhoto = async (file: File) => {
     if (!project || !activeRoom) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      if (dataUrl) {
+        try {
+          localStorage.setItem(`mr_photo_preview_${activeRoom.id}`, dataUrl);
+          localStorage.setItem('mr_photo_preview_latest', dataUrl);
+        } catch {}
+      }
+    };
+    reader.readAsDataURL(file);
+
     const uploadedAsset = await apiClient.uploadRoomPhoto(activeRoom.id, file);
     if (uploadedAsset?.file_path) {
       localStorage.setItem(`mr_file_path_${activeRoom.id}`, uploadedAsset.file_path);
+    }
+    if (uploadedAsset?.thumbnail_url && uploadedAsset.thumbnail_url.startsWith('data:')) {
+      try {
+        localStorage.setItem(`mr_photo_preview_${activeRoom.id}`, uploadedAsset.thumbnail_url);
+        localStorage.setItem('mr_photo_preview_latest', uploadedAsset.thumbnail_url);
+      } catch {}
     }
     await reloadProjectAndRoomState(project.id, activeRoom.id);
   };
@@ -285,6 +303,12 @@ export function ProjectWorkspace() {
       }
     }
     const initialKind = (admission.kind || selectedKind) as 'image' | 'video';
+    const initialRes = admission.resolution || (initialKind === 'image' ? '640px' : '480p');
+    const initialModel = admission.model || (initialKind === 'image' ? 'qwen-edit' : 'kling-v1');
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(`mr_resolution_${admission.job_id}`, initialRes);
+      localStorage.setItem(`mr_model_${admission.job_id}`, initialModel);
+    }
     setJobSnapshot({
       job_id: admission.job_id,
       id: admission.job_id,
@@ -295,8 +319,8 @@ export function ProjectWorkspace() {
       state: 'queued',
       provider_state: 'queued',
       permitted_next_action: 'wait',
-      model: initialKind === 'image' ? 'qwen-edit' : 'kling-v1',
-      resolution: initialKind === 'image' ? '640px' : '480p',
+      model: initialModel,
+      resolution: initialRes,
       output_asset_url: null,
       events: [
         {
@@ -435,9 +459,13 @@ export function ProjectWorkspace() {
     activeRoom?.accepted_image_asset_id ||
     null;
 
-  const stillCompareUrl = rawStillCompareUrl
-    ? `${rawStillCompareUrl}${rawStillCompareUrl.includes('?') ? '&' : '?'}v=${stillAssetId || jobSnapshot?.job_id || 'latest'}`
-    : null;
+  const stillCompareUrl = rawStillCompareUrl || null;
+
+  const beforePhotoUrl =
+    (typeof window !== 'undefined' && activeRoom ? localStorage.getItem(`mr_photo_preview_${activeRoom.id}`) : null) ||
+    (typeof window !== 'undefined' ? localStorage.getItem('mr_photo_preview_latest') : null) ||
+    activeRoom?.thumbnail_url ||
+    null;
 
   const stillReviewAssetId =
     jobSnapshot?.kind === 'image' &&
@@ -660,22 +688,11 @@ export function ProjectWorkspace() {
                 <>
                   {stillCompareUrl && (
                     <div className="card" style={{ marginBottom: '20px' }}>
-                      {activeRoom?.thumbnail_url ? (
-                        <ImageCompare
-                          beforeUrl={activeRoom.thumbnail_url}
-                          afterUrl={stillCompareUrl}
-                          roomName={activeRoom.name}
-                        />
-                      ) : (
-                        <div style={{ textAlign: 'center', padding: '16px' }}>
-                          <h3 style={{ marginTop: 0 }}>Renovated Photo</h3>
-                          <img
-                            src={stillCompareUrl}
-                            alt={activeRoom?.name || 'Renovated Room'}
-                            style={{ maxWidth: '100%', maxHeight: '520px', borderRadius: '8px', objectFit: 'contain' }}
-                          />
-                        </div>
-                      )}
+                      <ImageCompare
+                        beforeUrl={beforePhotoUrl || activeRoom?.thumbnail_url || ''}
+                        afterUrl={stillCompareUrl}
+                        roomName={activeRoom.name}
+                      />
                       {stillReviewAssetId ? (
                         <ReviewChecklist
                           assetId={stillReviewAssetId}

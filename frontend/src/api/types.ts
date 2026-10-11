@@ -210,6 +210,8 @@ export interface GenerationAdmissionResponse {
   provider_id?: string;
   room_id?: string;
   kind?: 'image' | 'video';
+  model?: string;
+  resolution?: string;
   state: JobState;
   status_route: string;
   events_route: string;

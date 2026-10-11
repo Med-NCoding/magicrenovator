@@ -289,13 +289,15 @@ export const apiClient = {
 
   async getGeneration(
     jobId: string,
-    options?: { provider_id?: string; kind?: string; room_id?: string }
+    options?: { provider_id?: string; kind?: string; room_id?: string; resolution?: string; model?: string }
   ): Promise<GenerationSnapshotResponse> {
     let url = `/api/generations/${encodeURIComponent(jobId)}`;
     const params = new URLSearchParams();
     if (options?.provider_id) params.set('provider_id', options.provider_id);
     if (options?.kind) params.set('kind', options.kind);
     if (options?.room_id) params.set('room_id', options.room_id);
+    if (options?.resolution) params.set('resolution', options.resolution);
+    if (options?.model) params.set('model', options.model);
     const q = params.toString();
     if (q) url += `?${q}`;
     return requestJson<GenerationSnapshotResponse>(url);

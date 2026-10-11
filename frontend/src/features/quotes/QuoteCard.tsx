@@ -37,7 +37,7 @@ export function QuoteCard({
     isFreeTier ? 'Draft' : 'Presentation'
   );
   const [resolution, setResolution] = useState<QuoteOptions['resolution']>(
-    kind === 'image' ? (isFreeTier ? '640px' : '1k') : isFreeTier ? '480p' : '720p'
+    kind === 'image' ? '640px' : isFreeTier ? '480p' : '720p'
   );
   const [durationSeconds, setDurationSeconds] = useState<number>(5);
   const [motionPreset, setMotionPreset] = useState<'nearly_still' | 'gentle_push' | 'small_lateral'>(
@@ -157,6 +157,10 @@ export function QuoteCard({
         prompt: promptText,
         room_id: room.id,
       });
+      if (admission?.job_id && typeof window !== 'undefined') {
+        localStorage.setItem(`mr_resolution_${admission.job_id}`, quote.resolution);
+        localStorage.setItem(`mr_model_${admission.job_id}`, quote.model);
+      }
       const confirmedQuote = quote;
       setQuote(null);
       onJobStarted(admission, confirmedQuote);
@@ -254,7 +258,7 @@ export function QuoteCard({
               <select
                 id={`resolution-${kind}`}
                 className="field-input"
-                value={resolution || '1k'}
+                value={resolution || '640px'}
                 onChange={(e) => {
                   setResolution(e.target.value as QuoteOptions['resolution']);
                   setQuote(null);
