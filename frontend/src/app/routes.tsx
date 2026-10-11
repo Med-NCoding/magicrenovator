@@ -123,6 +123,53 @@ function PrivacyPage() {
   );
 }
 
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error('UI runtime error caught by boundary:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ maxWidth: '600px', margin: '40px auto', padding: '24px' }} className="card">
+          <h2 style={{ color: 'var(--danger)', marginTop: 0 }}>Something went wrong</h2>
+          <p style={{ color: 'var(--text-muted)' }}>
+            An unexpected error occurred while displaying this page.
+          </p>
+          <div style={{ display: 'flex', gap: '12px', marginTop: '16px' }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => {
+                this.setState({ hasError: false, error: null });
+                window.location.reload();
+              }}
+            >
+              Reload Page
+            </button>
+            <a href="/app" className="btn btn-secondary">
+              Go to Projects
+            </a>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export function AppRoutes() {
   return (
     <div className="app-shell">
@@ -148,14 +195,16 @@ export function AppRoutes() {
 
       <ConnectModal />
 
-      <Routes>
-        <Route path="/" element={<LandingPage />} />
-        <Route path="/app" element={<ProjectList />} />
-        <Route path="/app/projects/:projectId" element={<ProjectWorkspace />} />
-        <Route path="/app/projects/:projectId/rooms/:roomId" element={<ProjectWorkspace />} />
-        <Route path="/help" element={<HelpPage />} />
-        <Route path="/privacy" element={<PrivacyPage />} />
-      </Routes>
+      <ErrorBoundary>
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/app" element={<ProjectList />} />
+          <Route path="/app/projects/:projectId" element={<ProjectWorkspace />} />
+          <Route path="/app/projects/:projectId/rooms/:roomId" element={<ProjectWorkspace />} />
+          <Route path="/help" element={<HelpPage />} />
+          <Route path="/privacy" element={<PrivacyPage />} />
+        </Routes>
+      </ErrorBoundary>
     </div>
   );
 }

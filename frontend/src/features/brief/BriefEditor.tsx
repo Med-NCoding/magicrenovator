@@ -23,9 +23,11 @@ export function BriefEditor({
   }) => void;
   disabled?: boolean;
 }) {
-  const [rawText, setRawText] = useState(activeBrief?.brief.raw_request || '');
+  const [rawText, setRawText] = useState(
+    activeBrief?.brief?.raw_request || (activeBrief as any)?.brief?.raw_text || ''
+  );
   const [preserve, setPreserve] = useState<string[]>(
-    activeBrief?.brief.preserve || [
+    activeBrief?.brief?.preserve || [
       'Room footprint',
       'Camera viewpoint',
       'Doors',
@@ -34,15 +36,23 @@ export function BriefEditor({
     ]
   );
   const [layoutMode, setLayoutMode] = useState<'preserve' | 'conceptual_change'>(
-    activeBrief?.brief.layout_mode || 'preserve'
+    activeBrief?.brief?.layout_mode || 'preserve'
   );
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (activeBrief) {
-      setRawText(activeBrief.brief.raw_request);
-      setPreserve(activeBrief.brief.preserve);
-      setLayoutMode(activeBrief.brief.layout_mode);
+      setRawText(activeBrief.brief?.raw_request || (activeBrief as any)?.brief?.raw_text || '');
+      setPreserve(
+        activeBrief.brief?.preserve || [
+          'Room footprint',
+          'Camera viewpoint',
+          'Doors',
+          'Windows',
+          'Ceiling height',
+        ]
+      );
+      setLayoutMode(activeBrief.brief?.layout_mode || 'preserve');
     } else {
       setRawText('');
       setPreserve([
@@ -54,16 +64,19 @@ export function BriefEditor({
       ]);
       setLayoutMode('preserve');
     }
-  }, [activeBrief?.id, activeBrief?.brief.raw_request]);
+  }, [activeBrief?.id, activeBrief?.brief?.raw_request, (activeBrief as any)?.brief?.raw_text]);
 
   useEffect(() => {
     if (!onDraftChange) return;
+    const briefRaw = activeBrief?.brief?.raw_request || (activeBrief as any)?.brief?.raw_text || '';
+    const briefPreserve = activeBrief?.brief?.preserve || [];
+    const briefLayout = activeBrief?.brief?.layout_mode || 'preserve';
     const isDirty = Boolean(
       rawText.trim() &&
         (!activeBrief ||
-          rawText.trim() !== activeBrief.brief.raw_request.trim() ||
-          layoutMode !== activeBrief.brief.layout_mode ||
-          preserve.join('|') !== activeBrief.brief.preserve.join('|'))
+          rawText.trim() !== briefRaw.trim() ||
+          layoutMode !== briefLayout ||
+          preserve.join('|') !== briefPreserve.join('|'))
     );
     onDraftChange({
       raw_text: rawText.trim(),
@@ -96,7 +109,7 @@ export function BriefEditor({
         raw_text: rawText.trim(),
         preserve,
         layout_mode: layoutMode,
-        resolve_conflicts: activeBrief.brief.unresolved,
+        resolve_conflicts: activeBrief.brief?.unresolved || [],
       });
     } finally {
       setSaving(false);
@@ -159,7 +172,7 @@ export function BriefEditor({
         >
           <strong>Preservation Conflict Detected:</strong>
           <ul style={{ margin: '6px 0', paddingLeft: '18px', fontSize: '0.875rem' }}>
-            {activeBrief.brief.unresolved.map((c, i) => (
+            {(activeBrief.brief?.unresolved || []).map((c, i) => (
               <li key={i}>{c}</li>
             ))}
           </ul>
@@ -187,7 +200,9 @@ export function BriefEditor({
           }}
         >
           <strong>Saved Prompt (Revision #{activeBrief.revision_number}):</strong>
-          <div style={{ marginTop: '4px', color: 'var(--text-muted)' }}>{activeBrief.brief.raw_request}</div>
+          <div style={{ marginTop: '4px', color: 'var(--text-muted)' }}>
+            {activeBrief.brief?.raw_request || (activeBrief as any)?.brief?.raw_text || ''}
+          </div>
         </div>
       )}
     </form>

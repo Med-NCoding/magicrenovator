@@ -44,16 +44,28 @@ interface Asset {
 interface Brief {
   id: string;
   room_id: string;
-  raw_text: string;
-  compiled_prompt: string;
+  parent_revision_id?: string | null;
   source_asset_id?: string | null;
+  accepted_reference_asset_id?: string | null;
   revision_number: number;
   brief: {
-    raw_text: string;
-    changes: Array<{ id: string; category: string; target: string; action: string; details?: string }>;
+    room_type: string;
+    raw_request: string;
+    raw_text?: string;
+    changes: Array<{ target: string; description: string; source: 'user_text' | 'user_control' }>;
     preserve: string[];
     layout_mode: 'preserve' | 'conceptual_change';
+    style?: string | null;
+    unresolved: string[];
+    compiler_version: string;
   };
+  compiled_prompt: string;
+  source_hash: string;
+  compiler_version: string;
+  has_unresolved_conflicts: boolean;
+  quote_eligible: boolean;
+  submitted: boolean;
+  created_at: string;
 }
 
 interface Job {
@@ -449,24 +461,44 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       if (segments[2] === 'briefs' && method === 'POST') {
         const body = await parseJsonBody(req);
         const briefId = `brf_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-        const rawText = String(body.raw_text || '').trim();
+        const rawText = String(body.raw_text || body.raw_request || '').trim();
+        const room = roomsStore.get(roomId);
+        const roomType = room?.room_type || 'kitchen';
+
         const brief: Brief = {
           id: briefId,
           room_id: roomId,
-          raw_text: rawText,
-          compiled_prompt: rawText,
-          source_asset_id: body.accepted_reference_asset_id || null,
+          parent_revision_id: body.parent_revision_id || null,
+          source_asset_id: room?.primary_asset_id || null,
+          accepted_reference_asset_id: body.accepted_reference_asset_id || null,
           revision_number: 1,
           brief: {
+            room_type: roomType,
+            raw_request: rawText,
             raw_text: rawText,
             changes: body.changes || [],
-            preserve: body.preserve || [],
-            layout_mode: body.layout_mode || 'preserve'
-          }
+            preserve: body.preserve || [
+              'Room footprint',
+              'Camera viewpoint',
+              'Doors',
+              'Windows',
+              'Ceiling height'
+            ],
+            layout_mode: body.layout_mode || 'preserve',
+            style: body.style || null,
+            unresolved: [],
+            compiler_version: 'reno-brief-v1'
+          },
+          compiled_prompt: rawText,
+          source_hash: `hash_${Date.now()}`,
+          compiler_version: 'reno-brief-v1',
+          has_unresolved_conflicts: false,
+          quote_eligible: true,
+          submitted: false,
+          created_at: new Date().toISOString()
         };
         briefsStore.set(briefId, brief);
 
-        const room = roomsStore.get(roomId);
         if (room) {
           room.active_brief_revision_id = briefId;
         }
@@ -581,21 +613,83 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     if (segments[0] === 'quotes' && method === 'POST') {
       const body = await parseJsonBody(req);
       const kind = body.kind === 'video' ? 'video' : 'image';
-      const estimatedCredits = kind === 'image' ? 20 : 240;
+      const estimatedCredits = kind === 'video' ? 240 : 20;
       const quoteId = `quo_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const briefId = body.brief_id || 'brf_default';
+      const brief = briefsStore.get(briefId);
+      const roomId = brief?.room_id || 'default';
+      const room = roomsStore.get(roomId);
+
+      const key = extractKey(req);
+      let balance = 1000;
+      if (key) {
+        try {
+          const accRes = await fetch('https://api.magichour.ai/v1/account', {
+            headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' }
+          });
+          if (accRes.ok) {
+            const accData = await accRes.json();
+            if (typeof accData.credits === 'number') balance = accData.credits;
+            else if (typeof accData.total_credits_remaining === 'number') balance = accData.total_credits_remaining;
+          }
+        } catch {}
+      }
+
       return sendJson(res, 200, {
+        quote_id: quoteId,
         id: quoteId,
-        brief_id: body.brief_id || 'brf_default',
         kind,
+        brief_revision_id: briefId,
+        brief_id: briefId,
+        source_asset_id: room?.primary_asset_id || 'ast_default',
+        model: kind === 'image' ? (body.model || 'qwen-edit') : (body.model || 'kling-v1'),
+        quality_label: body.options?.quality_label || (kind === 'image' ? 'Presentation' : 'Draft'),
+        resolution: body.options?.resolution || (kind === 'image' ? '1k' : '720p'),
+        image_count: 1,
+        duration_seconds: body.options?.duration_seconds || 5,
+        audio: false,
+        motion_preset: body.options?.motion_preset || 'gentle_push',
         estimated_credits: estimatedCredits,
-        model: kind === 'image' ? 'qwen-edit' : 'kling-v1',
-        options: body.options || {},
-        expires_at: new Date(Date.now() + 300000).toISOString()
+        authorized_max_credits: estimatedCredits,
+        anticipated_clip_credits: kind === 'video' ? estimatedCredits : null,
+        anticipated_total_workflow_credits: estimatedCredits,
+        balance: balance,
+        balance_checked_at: new Date().toISOString(),
+        sufficient_credits: balance >= estimatedCredits,
+        catalog_version: 'cat_v1',
+        expires_at: new Date(Date.now() + 300000).toISOString(),
+        requires_confirmation: true
       });
     }
 
     // 7. /api/generations
     if (segments[0] === 'generations') {
+      // POST /api/generations/:id/stop
+      if (segments.length === 3 && segments[2] === 'stop' && method === 'POST') {
+        const jobId = segments[1];
+        const job = jobsStore.get(jobId);
+        if (job) job.state = 'ready_for_review';
+        return sendJson(res, 200, {
+          job_id: jobId,
+          id: jobId,
+          state: 'stopped',
+          safe_message: 'Generation stopped.'
+        });
+      }
+
+      // POST /api/generations/:id/resume
+      if (segments.length === 3 && segments[2] === 'resume' && method === 'POST') {
+        const jobId = segments[1];
+        const job = jobsStore.get(jobId);
+        if (job) job.state = 'polling_provider';
+        return sendJson(res, 200, {
+          job_id: jobId,
+          id: jobId,
+          state: 'polling_provider',
+          safe_message: 'Generation resumed.'
+        });
+      }
+
       // POST /api/generations (start)
       if (method === 'POST' && segments.length === 1) {
         const key = extractKey(req);
@@ -675,7 +769,12 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
           return sendJson(res, 200, {
             job_id: jobId,
+            id: jobId,
             state: 'queued',
+            status_route: `/api/generations/${jobId}`,
+            events_route: `/api/generations/${jobId}/events`,
+            quote_id: body.quote_id || `quo_${jobId}`,
+            idempotency_key: body.idempotency_key || `idemp_${jobId}`,
             safe_message: 'Job submitted to Magic Hour.'
           });
         } catch (err: any) {
@@ -743,17 +842,48 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           }
         }
 
+        const events = [
+          {
+            sequence: 1,
+            job_id: job.id,
+            state: job.state,
+            safe_message:
+              job.state === 'ready_for_review'
+                ? 'Generation complete and ready for review.'
+                : job.state === 'failed'
+                ? 'Magic Hour generation encountered an error.'
+                : 'Rendering renovation on Magic Hour...',
+            timestamp: new Date().toISOString(),
+            payload: {}
+          }
+        ];
+
         return sendJson(res, 200, {
+          job_id: job.id,
           id: job.id,
-          correlation_name: `MR_${job.id}`,
+          project_id: job.project_id || 'default',
+          room_id: job.room_id || 'default',
+          brief_revision_id: 'brf_default',
+          quote_id: 'quo_default',
           kind: job.kind,
-          model: job.kind === 'image' ? 'qwen-edit' : 'kling-v1',
           state: job.state,
           provider_state: job.provider_state,
-          provider_id: job.provider_id,
-          compiled_prompt: job.prompt,
+          permitted_next_action: job.state === 'ready_for_review' ? 'review' : 'wait',
+          model: job.kind === 'image' ? 'qwen-edit' : 'kling-v1',
+          resolution: job.kind === 'image' ? '1k' : '720p',
+          source_asset_id: 'ast_default',
+          source_asset_url: null,
           output_asset_id: job.output_asset_id || null,
+          output_asset_url: job.output_url || null,
           output_url: job.output_url || null,
+          brief_outdated: false,
+          estimated_credits: job.kind === 'video' ? 240 : 20,
+          correlation_name: `MR_${job.id}`,
+          provider_id: job.provider_id,
+          last_safe_error: null,
+          created_at: job.created_at,
+          updated_at: new Date().toISOString(),
+          events: events,
           safe_message:
             job.state === 'ready_for_review'
               ? 'Generation verified and ready for review.'

@@ -203,14 +203,14 @@ export function ProjectWorkspace() {
     if (!project || !activeRoom || !notes.trim()) return;
     const rev = await apiClient.saveRoomBrief(activeRoom.id, {
       raw_text: notes.trim().slice(0, 2000),
-      preserve: activeBrief?.brief.preserve || [
+      preserve: activeBrief?.brief?.preserve || [
         'Room footprint',
         'Camera viewpoint',
         'Doors',
         'Windows',
         'Ceiling height',
       ],
-      layout_mode: activeBrief?.brief.layout_mode || 'preserve',
+      layout_mode: activeBrief?.brief?.layout_mode || 'preserve',
       resolve_conflicts: [
         'doors',
         'windows',
