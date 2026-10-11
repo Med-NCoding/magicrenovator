@@ -82,6 +82,8 @@ interface Job {
   prompt: string;
   output_asset_id?: string | null;
   output_url?: string | null;
+  output_data_url?: string | null;
+  last_error?: string | null;
   created_at: string;
 }
 
@@ -114,6 +116,24 @@ function extractKey(req: IncomingMessage): string | null {
 }
 
 function parseJsonBody(req: IncomingMessage): Promise<any> {
+  const anyReq = req as any;
+  if (anyReq.body && typeof anyReq.body === 'object' && !Buffer.isBuffer(anyReq.body)) {
+    return Promise.resolve(anyReq.body);
+  }
+  if (typeof anyReq.body === 'string' && anyReq.body.length > 0) {
+    try {
+      return Promise.resolve(JSON.parse(anyReq.body));
+    } catch {
+      return Promise.resolve({});
+    }
+  }
+  if (Buffer.isBuffer(anyReq.body) && anyReq.body.length > 0) {
+    try {
+      return Promise.resolve(JSON.parse(anyReq.body.toString('utf8')));
+    } catch {
+      return Promise.resolve({});
+    }
+  }
   return new Promise((resolve) => {
     let data = '';
     req.on('data', (chunk) => {
@@ -130,6 +150,16 @@ function parseJsonBody(req: IncomingMessage): Promise<any> {
 }
 
 function parseRawBody(req: IncomingMessage): Promise<Buffer> {
+  const anyReq = req as any;
+  if (Buffer.isBuffer(anyReq.body) && anyReq.body.length > 0) {
+    return Promise.resolve(anyReq.body);
+  }
+  if (typeof anyReq.body === 'string' && anyReq.body.length > 0) {
+    return Promise.resolve(Buffer.from(anyReq.body, 'binary'));
+  }
+  if (anyReq.body && typeof anyReq.body === 'object') {
+    return Promise.resolve(Buffer.from(JSON.stringify(anyReq.body), 'utf8'));
+  }
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk) => {
@@ -384,14 +414,32 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         const projectId = segments[1];
         let project = projectsStore.get(projectId);
         if (!project) {
+          const defaultRoom: Room = {
+            id: projectId,
+            project_id: projectId,
+            name: 'Workspace',
+            room_type: 'workspace',
+            sort_order: 0
+          };
+          roomsStore.set(defaultRoom.id, defaultRoom);
           project = {
             id: projectId,
             name: 'Renovation Project',
             created_at: new Date().toISOString(),
             expires_at: new Date(Date.now() + 7 * 86400000).toISOString(),
-            rooms: []
+            rooms: [defaultRoom]
           };
           projectsStore.set(projectId, project);
+        } else if (!project.rooms || project.rooms.length === 0) {
+          const defaultRoom: Room = {
+            id: projectId,
+            project_id: projectId,
+            name: project.name || 'Workspace',
+            room_type: 'workspace',
+            sort_order: 0
+          };
+          roomsStore.set(defaultRoom.id, defaultRoom);
+          project.rooms = [defaultRoom];
         }
         return sendJson(res, 200, project);
       }
@@ -407,12 +455,21 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       if (method === 'POST') {
         const body = await parseJsonBody(req);
         const projectId = `prj_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        const projectName = String(body.name || 'New Renovation').trim();
+        const defaultRoom: Room = {
+          id: projectId,
+          project_id: projectId,
+          name: projectName,
+          room_type: 'workspace',
+          sort_order: 0
+        };
+        roomsStore.set(defaultRoom.id, defaultRoom);
         const project: Project = {
           id: projectId,
-          name: String(body.name || 'New Renovation').trim(),
+          name: projectName,
           created_at: new Date().toISOString(),
           expires_at: new Date(Date.now() + 7 * 86400000).toISOString(),
-          rooms: []
+          rooms: [defaultRoom]
         };
         projectsStore.set(projectId, project);
         return sendJson(res, 201, project);
@@ -429,26 +486,93 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     if (segments[0] === 'rooms' && segments.length >= 2) {
       const roomId = segments[1];
 
-      // POST /api/rooms/:id/assets (Photo Upload)
+      // POST /api/rooms/:id/assets (Photo Upload to Magic Hour)
       if (segments[2] === 'assets' && method === 'POST') {
         const key = extractKey(req);
         if (!key) {
-          return sendError(res, 401, 'not_connected', 'Please connect your Magic Hour key first.');
+          return sendError(res, 401, 'not_connected', 'Please connect your Magic Hour API key first.');
         }
 
-        const rawBuffer = await parseRawBody(req);
-        const fileBytes = extractFileBytes(rawBuffer, req.headers['content-type']);
+        const contentTypeHeader = String(req.headers['content-type'] || '').toLowerCase();
+        let fileBytes: Buffer = Buffer.alloc(0);
+        let extension = 'jpg';
+        let mimeType = 'image/jpeg';
+
+        const SUPPORTED_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'avif', 'tiff', 'tif', 'bmp', 'jfif']);
+
+        if (contentTypeHeader.includes('application/json')) {
+          const body = await parseJsonBody(req);
+          const dataUrl = String(body.data_url || body.image_base64 || '');
+          const filename = String(body.filename || '');
+          const extMatch = filename.match(/\.([a-z0-9]+)$/i);
+          if (extMatch) {
+            const rawExt = extMatch[1].toLowerCase();
+            if (!SUPPORTED_EXTENSIONS.has(rawExt)) {
+              return sendError(
+                res,
+                400,
+                'unsupported_format',
+                `File format ".${rawExt}" is not supported by Magic Hour. Supported image formats: JPG, JPEG, PNG, WebP, HEIC.`
+              );
+            }
+            extension = rawExt === 'jpeg' || rawExt === 'jfif' ? 'jpg' : rawExt;
+          }
+          const base64Match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+          if (base64Match) {
+            mimeType = base64Match[1].toLowerCase();
+            fileBytes = Buffer.from(base64Match[2], 'base64');
+            if (mimeType.includes('png')) extension = 'png';
+            else if (mimeType.includes('webp')) extension = 'webp';
+            else if (mimeType.includes('heic')) extension = 'heic';
+            else if (mimeType.includes('gif') || mimeType.includes('svg') || mimeType.includes('pdf')) {
+              return sendError(
+                res,
+                400,
+                'unsupported_format',
+                `File type "${mimeType}" is not supported by Magic Hour. Supported image formats: JPG, JPEG, PNG, WebP, HEIC.`
+              );
+            }
+          } else if (dataUrl) {
+            fileBytes = Buffer.from(dataUrl, 'base64');
+          }
+        } else {
+          if (
+            contentTypeHeader.includes('image/gif') ||
+            contentTypeHeader.includes('image/svg') ||
+            contentTypeHeader.includes('application/pdf') ||
+            contentTypeHeader.includes('video/')
+          ) {
+            return sendError(
+              res,
+              400,
+              'unsupported_format',
+              `File type "${contentTypeHeader}" is not supported by Magic Hour for room photos. Supported formats: JPG, JPEG, PNG, WebP, HEIC.`
+            );
+          }
+          const rawBuffer = await parseRawBody(req);
+          fileBytes = extractFileBytes(rawBuffer, req.headers['content-type']);
+          if (fileBytes[0] === 0x89 && fileBytes[1] === 0x50 && fileBytes[2] === 0x4e && fileBytes[3] === 0x47) {
+            extension = 'png';
+            mimeType = 'image/png';
+          } else if (fileBytes[0] === 0x52 && fileBytes[1] === 0x49 && fileBytes[2] === 0x46 && fileBytes[3] === 0x46) {
+            extension = 'webp';
+            mimeType = 'image/webp';
+          } else if (fileBytes[0] === 0x47 && fileBytes[1] === 0x49 && fileBytes[2] === 0x46) {
+            return sendError(
+              res,
+              400,
+              'unsupported_format',
+              'GIF images are not accepted by Magic Hour AI Image Editor. Please attach a JPG, PNG, or WebP photo.'
+            );
+          }
+        }
+
         if (fileBytes.length === 0) {
           return sendError(res, 400, 'invalid_upload', 'Empty photo upload received.');
         }
 
-        let extension = 'jpg';
-        if (fileBytes[0] === 0x89 && fileBytes[1] === 0x50 && fileBytes[2] === 0x4e && fileBytes[3] === 0x47) {
-          extension = 'png';
-        }
-
         try {
-          // Reserve upload URL from Magic Hour
+          // 1. Reserve upload URL from Magic Hour
           const uploadRes = await fetch('https://api.magichour.ai/v1/files/upload-urls', {
             method: 'POST',
             headers: {
@@ -462,29 +586,38 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           });
 
           if (!uploadRes.ok) {
-            return sendError(res, 502, 'upload_failed', 'Failed to get upload URL from Magic Hour.');
+            const errTxt = await uploadRes.text().catch(() => '');
+            return sendError(res, 502, 'upload_failed', `Magic Hour rejected upload slot (${uploadRes.status}): ${errTxt.slice(0, 140)}`);
           }
 
           const uploadData = await uploadRes.json();
           const firstItem = uploadData.items?.[0];
-          if (!firstItem || !firstItem.upload_url) {
+          if (!firstItem || !firstItem.upload_url || !firstItem.file_path) {
             return sendError(res, 502, 'upload_failed', 'Malformed upload response from Magic Hour.');
           }
 
-          // Upload raw clean image bytes to Magic Hour signed URL
-          await fetch(firstItem.upload_url, {
+          // 2. Upload raw clean image bytes to Magic Hour signed URL and verify success
+          let putRes = await fetch(firstItem.upload_url, {
             method: 'PUT',
-            headers: { 'Content-Type': extension === 'png' ? 'image/png' : 'image/jpeg' },
+            headers: { 'Content-Type': mimeType },
             body: fileBytes
           });
+          if (!putRes.ok) {
+            putRes = await fetch(firstItem.upload_url, {
+              method: 'PUT',
+              body: fileBytes
+            });
+          }
+          if (!putRes.ok) {
+            return sendError(res, 502, 'upload_put_failed', `Failed to upload photo bytes to Magic Hour storage (HTTP ${putRes.status}).`);
+          }
 
           const assetId = `ast_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-          const mimeType = extension === 'png' ? 'image/png' : 'image/jpeg';
           const previewDataUrl = `data:${mimeType};base64,${fileBytes.toString('base64')}`;
           const asset: Asset = {
             id: assetId,
             room_id: roomId,
-            project_id: 'default',
+            project_id: roomId,
             role: 'original_photo',
             mime_type: mimeType,
             bytes_size: fileBytes.length,
@@ -671,7 +804,17 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     if (segments[0] === 'quotes' && method === 'POST') {
       const body = await parseJsonBody(req);
       const kind = body.kind === 'video' ? 'video' : 'image';
-      const estimatedCredits = kind === 'video' ? 240 : 20;
+      const resolution = body.options?.resolution || (kind === 'image' ? '640px' : '480p');
+      const estimatedCredits =
+        kind === 'video'
+          ? resolution === '480p'
+            ? 120
+            : 240
+          : resolution === '640px'
+          ? 10
+          : resolution === '1k'
+          ? 20
+          : 40;
       const quoteId = `quo_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const briefId = body.brief_id || 'brf_default';
       const brief = briefsStore.get(briefId);
@@ -695,7 +838,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
       const model = kind === 'image' ? (body.model || 'qwen-edit') : (body.model || 'kling-v1');
       const qualityLabel = body.options?.quality_label || (kind === 'image' ? 'Draft' : 'Draft');
-      const resolution = body.options?.resolution || (kind === 'image' ? '640px' : '480p');
 
       const quote = {
         quote_id: quoteId,
@@ -1059,6 +1201,22 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
                   (typeof data.downloads?.[0] === 'string' ? data.downloads[0] : null);
 
                 if (downloadUrl) {
+                  let fetchedDataUrl: string | null = null;
+                  if (job.kind === 'image') {
+                    try {
+                      const imgRes = await fetch(downloadUrl);
+                      if (imgRes.ok && typeof imgRes.arrayBuffer === 'function') {
+                        const imgBuf = Buffer.from(await imgRes.arrayBuffer());
+                        if (imgBuf.length > 0 && imgBuf.length < 4_000_000) {
+                          const ct = imgRes.headers?.get?.('content-type') || 'image/jpeg';
+                          fetchedDataUrl = `data:${ct};base64,${imgBuf.toString('base64')}`;
+                        }
+                      }
+                    } catch {
+                      // Fallback to direct or proxy URL
+                    }
+                  }
+
                   const outputAssetId = `ast_${Date.now()}_out`;
                   const outputAsset: Asset = {
                     id: outputAssetId,
@@ -1069,7 +1227,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
                     bytes_size: 2048,
                     width: 1280,
                     height: 720,
-                    thumbnail_url: downloadUrl,
+                    thumbnail_url: fetchedDataUrl || downloadUrl,
                     download_url: downloadUrl,
                     created_at: new Date().toISOString()
                   };
@@ -1078,12 +1236,13 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
                   job.state = 'ready_for_review';
                   job.output_asset_id = outputAssetId;
                   job.output_url = downloadUrl;
+                  job.output_data_url = fetchedDataUrl;
 
                   const room = roomsStore.get(job.room_id);
                   if (room) {
                     room.latest_job_id = job.id;
                     if (job.kind === 'image') {
-                      room.accepted_image_url = downloadUrl;
+                      room.accepted_image_url = fetchedDataUrl || downloadUrl;
                       room.accepted_image_asset_id = outputAssetId;
                     } else {
                       room.accepted_clip_url = downloadUrl;
@@ -1095,6 +1254,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
                 }
               } else if (data.status === 'error') {
                 job.state = 'failed';
+                job.last_error = data.error?.message || data.message || 'Magic Hour encountered a generation error.';
               } else if (data.status === 'canceled') {
                 job.state = 'stopped';
               } else {
@@ -1106,6 +1266,18 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           }
         }
 
+        const resolvedRes = job.resolution || (job.kind === 'image' ? '640px' : '480p');
+        const resolvedCredits =
+          job.kind === 'video'
+            ? resolvedRes === '480p'
+              ? 120
+              : 240
+            : resolvedRes === '640px'
+            ? 10
+            : resolvedRes === '1k'
+            ? 20
+            : 40;
+
         const events = [
           {
             sequence: 1,
@@ -1115,7 +1287,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
               job.state === 'ready_for_review'
                 ? 'Generation complete and ready for review.'
                 : job.state === 'failed'
-                ? 'Magic Hour generation encountered an error.'
+                ? job.last_error || 'Magic Hour generation encountered an error.'
                 : job.state === 'stopped'
                 ? 'Magic Hour generation was stopped.'
                 : job.state === 'queued'
@@ -1138,17 +1310,22 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           provider_state: job.provider_state,
           permitted_next_action: job.state === 'ready_for_review' ? 'review' : 'wait',
           model: job.model || (job.kind === 'image' ? 'qwen-edit' : 'kling-v1'),
-          resolution: job.resolution || (job.kind === 'image' ? '640px' : '480p'),
+          resolution: resolvedRes,
           source_asset_id: 'ast_default',
           source_asset_url: null,
           output_asset_id: job.output_asset_id || null,
           output_asset_url: job.output_url || null,
           output_url: job.output_url || null,
+          output_data_url: job.output_data_url || null,
           brief_outdated: false,
-          estimated_credits: job.kind === 'video' ? 240 : 20,
+          estimated_credits: resolvedCredits,
+          billing: {
+            estimated_credits: resolvedCredits,
+            actual_credits: resolvedCredits
+          },
           correlation_name: `MR_${job.id}`,
           provider_id: job.provider_id,
-          last_safe_error: null,
+          last_safe_error: job.last_error ? { code: 'provider_error', message: job.last_error } : null,
           created_at: job.created_at,
           updated_at: new Date().toISOString(),
           events: events,
@@ -1160,21 +1337,26 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       }
     }
 
-    // 8. /api/proxy-image (Reliably stream image if direct S3 URL has CORS or header restrictions)
+    // 8. /api/proxy-image (Reliably stream or download image/video from Magic Hour S3)
     if (segments[0] === 'proxy-image' && method === 'GET') {
       const targetUrl = urlObj.searchParams.get('url');
       if (!targetUrl || !targetUrl.startsWith('http')) {
-        return sendError(res, 400, 'invalid_url', 'Missing or invalid image URL.');
+        return sendError(res, 400, 'invalid_url', 'Missing or invalid media URL.');
       }
       try {
         const upstream = await fetch(targetUrl);
         if (!upstream.ok) {
-          return sendError(res, upstream.status, 'proxy_failed', 'Failed to retrieve image.');
+          return sendError(res, upstream.status, 'proxy_failed', 'Failed to retrieve media from Magic Hour.');
         }
         const contentType = upstream.headers.get('content-type') || 'image/jpeg';
         const buffer = Buffer.from(await upstream.arrayBuffer());
         res.setHeader('Content-Type', contentType);
         res.setHeader('Cache-Control', 'public, max-age=86400');
+        if (urlObj.searchParams.get('download') === '1') {
+          const rawFilename = urlObj.searchParams.get('filename') || (contentType.includes('video') ? 'renovated-video.mp4' : 'renovated-photo.jpg');
+          const safeFilename = rawFilename.replace(/[^a-zA-Z0-9._-]/g, '_');
+          res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
+        }
         res.statusCode = 200;
         return res.end(buffer);
       } catch (err: any) {

@@ -194,12 +194,22 @@ export const apiClient = {
   },
 
   async uploadRoomPhoto(roomId: string, file: File): Promise<AssetMetadataResponse> {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Failed to read image file'));
+      reader.readAsDataURL(file);
+    });
     return requestJson<AssetMetadataResponse>(`/api/rooms/${encodeURIComponent(roomId)}/assets`, {
       method: 'POST',
       headers: {
-        'Content-Type': file.type || 'image/jpeg',
+        'Content-Type': 'application/json',
       },
-      body: file,
+      body: JSON.stringify({
+        data_url: dataUrl,
+        filename: file.name,
+        mime_type: file.type || 'image/jpeg',
+      }),
     });
   },
 

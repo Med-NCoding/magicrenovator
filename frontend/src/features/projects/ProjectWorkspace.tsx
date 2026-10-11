@@ -1,841 +1,746 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import React, { useEffect, useRef, useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
 import { apiClient, SafeAppClientError } from '../../api/client';
-import {
-  BriefRevisionResponse,
-  ExportResponse,
-  GenerationAdmissionResponse,
-  GenerationSnapshotResponse,
-  PresentationClipItem,
-  ProjectSummary,
-  ReviewResponse,
-} from '../../api/types';
 import { useAppContext } from '../../app/providers';
-import { BriefEditor } from '../brief/BriefEditor';
-import { JobTimeline } from '../generation/JobTimeline';
-import { ClipOrderer } from '../presentation/ClipOrderer';
-import { ExportPanel } from '../presentation/ExportPanel';
-import { QuoteCard } from '../quotes/QuoteCard';
-import { ImageCompare } from '../review/ImageCompare';
-import { ReviewChecklist } from '../review/ReviewChecklist';
-import { VideoReview } from '../review/VideoReview';
-import { RoomList } from '../rooms/RoomList';
-import { RoomViewer } from '../rooms/RoomViewer';
+
+const ACCEPTED_EXTENSIONS = new Set([
+  'jpg',
+  'jpeg',
+  'png',
+  'webp',
+  'heic',
+  'heif',
+  'avif',
+  'tiff',
+  'tif',
+  'bmp',
+  'jfif',
+]);
+
+function triggerBrowserDownload(dataOrProxyUrl: string, rawRemoteUrl: string | null, filename: string) {
+  try {
+    if (dataOrProxyUrl.startsWith('data:')) {
+      const parts = dataOrProxyUrl.split(',');
+      const mimeMatch = parts[0].match(/:(.*?);/);
+      const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+      const bstr = atob(parts[1]);
+      let n = bstr.length;
+      const u8arr = new Uint8Array(n);
+      while (n--) {
+        u8arr[n] = bstr.charCodeAt(n);
+      }
+      const blob = new Blob([u8arr], { type: mime });
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+      return;
+    }
+  } catch {
+    // Fallback to server attachment stream below
+  }
+
+  const targetUrl = rawRemoteUrl || dataOrProxyUrl;
+  const downloadHref = targetUrl.startsWith('http')
+    ? `/api/proxy-image?url=${encodeURIComponent(targetUrl)}&download=1&filename=${encodeURIComponent(filename)}`
+    : targetUrl;
+
+  const a = document.createElement('a');
+  a.href = downloadHref;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
 
 export function ProjectWorkspace() {
   const { projectId, roomId } = useParams<{ projectId: string; roomId?: string }>();
-  const navigate = useNavigate();
-  const { setConnectionState } = useAppContext();
+  const workspaceId = projectId || roomId || 'default';
+  const { connection, openConnectModal, setConnectionState } = useAppContext();
 
-  const [project, setProject] = useState<ProjectSummary | null>(null);
-  const [activeBrief, setActiveBrief] = useState<BriefRevisionResponse | null>(null);
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [jobSnapshot, setJobSnapshot] = useState<GenerationSnapshotResponse | null>(null);
-  const [selectedKind, setSelectedKind] = useState<'image' | 'video'>('image');
-  const [autoQuoteNonce, setAutoQuoteNonce] = useState<number>(0);
-  const [isRevisionQuoteActive, setIsRevisionQuoteActive] = useState<boolean>(false);
-  const [hasEnteredQuoteFlow, setHasEnteredQuoteFlow] = useState<boolean>(false);
-  const [revisionBanner, setRevisionBanner] = useState<string | null>(null);
-  const [quickPhotoReviseNotes, setQuickPhotoReviseNotes] = useState('');
-  const [revisingPhoto, setRevisingPhoto] = useState(false);
-  const [draftBrief, setDraftBrief] = useState<{
-    raw_text: string;
-    preserve: string[];
-    layout_mode: 'preserve' | 'conceptual_change';
-    isDirty: boolean;
-  } | null>(null);
-  const [exportData, setExportData] = useState<ExportResponse | null>(null);
-  const [isAssembling, setIsAssembling] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [projectName, setProjectName] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const savedName = localStorage.getItem(`mr_project_name_${workspaceId}`);
+      if (savedName) return savedName;
+    }
+    return 'Renovation Workspace';
+  });
 
-  const flowTopRef = React.useRef<HTMLDivElement>(null);
+  // 1. Photo state
+  const [originalPhotoUrl, setOriginalPhotoUrl] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    return (
+      localStorage.getItem(`mr_photo_preview_${workspaceId}`) ||
+      localStorage.getItem('mr_photo_preview_latest') ||
+      null
+    );
+  });
+  const [filePath, setFilePath] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    return localStorage.getItem(`mr_file_path_${workspaceId}`) || null;
+  });
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
-  const scrollToFlowTop = useCallback(() => {
-    requestAnimationFrame(() => {
-      if (flowTopRef.current && typeof flowTopRef.current.scrollIntoView === 'function') {
-        flowTopRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      } else if (typeof window !== 'undefined' && typeof window.scrollTo === 'function') {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      }
-    });
-  }, []);
+  // 2. Prompt & Generation Settings
+  const [prompt, setPrompt] = useState<string>(() => {
+    if (typeof window === 'undefined') return '';
+    return localStorage.getItem(`mr_brief_prompt_${workspaceId}`) || '';
+  });
+  const [kind, setKind] = useState<'image' | 'video'>('image');
+  const [resolution, setResolution] = useState<string>('640px');
 
-  const reloadProjectAndRoomState = useCallback(
-    async (projId: string, targetRoomId?: string) => {
-      const proj = await apiClient.getProject(projId);
-      setProject(proj);
-      const rm = proj.rooms.find((r) => r.id === targetRoomId) || proj.rooms[0];
-      if (rm) {
-        const brief = await apiClient.getLatestRoomBrief(rm.id);
-        setActiveBrief(brief);
+  // 3. Active Generation & Result state
+  const [activeJobId, setActiveJobId] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    return localStorage.getItem(`mr_active_job_${workspaceId}`) || null;
+  });
+  const [providerId, setProviderId] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const jId = localStorage.getItem(`mr_active_job_${workspaceId}`);
+    return jId ? localStorage.getItem(`mr_provider_id_${jId}`) : null;
+  });
+  const [jobState, setJobState] = useState<string | null>(null);
+  const [jobModel, setJobModel] = useState<string>('qwen-edit');
+  const [jobResolution, setJobResolution] = useState<string>('640px');
+  const [secondsElapsed, setSecondsElapsed] = useState<number>(0);
+  const [submitting, setSubmitting] = useState<boolean>(false);
+  const [genError, setGenError] = useState<string | null>(null);
 
-        const existingJobId =
-          (typeof window !== 'undefined' ? localStorage.getItem(`mr_active_job_${rm.id}`) : null) ||
-          rm.latest_job_id;
+  // 4. Output & Approval state
+  const [outputDisplayUrl, setOutputDisplayUrl] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    return localStorage.getItem(`mr_output_data_${workspaceId}`) || localStorage.getItem(`mr_output_url_${workspaceId}`) || null;
+  });
+  const [outputRawUrl, setOutputRawUrl] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    return localStorage.getItem(`mr_output_url_${workspaceId}`) || null;
+  });
+  const [isApproved, setIsApproved] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem(`mr_approved_${workspaceId}`) === '1';
+  });
+  const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
 
-        if (existingJobId) {
-          setActiveJobId((prev) => prev || existingJobId);
-          try {
-            const storedProvId =
-              typeof window !== 'undefined' ? localStorage.getItem(`mr_provider_id_${existingJobId}`) || undefined : undefined;
-            const snap = await apiClient.getGeneration(existingJobId, {
-              provider_id: storedProvId,
-              room_id: rm.id,
-            });
-            setJobSnapshot((prev) => {
-              if (prev?.state === 'ready_for_review' && snap.state !== 'ready_for_review') return prev;
-              return snap;
-            });
-            if (snap.output_asset_url && typeof window !== 'undefined') {
-              localStorage.setItem(`mr_output_url_${rm.id}`, snap.output_asset_url);
-            }
-            if (snap.state === 'rejected') {
-              setIsRevisionQuoteActive(true);
-              setHasEnteredQuoteFlow(true);
-            }
-          } catch {
-            // Keep existing state on transient transport glitch
-          }
-        }
-      }
-      return proj;
-    },
-    []
-  );
+  const resultSectionRef = useRef<HTMLDivElement>(null);
 
+  // Load project title if available
   useEffect(() => {
-    if (!projectId) return;
-    let mounted = true;
-    setHasEnteredQuoteFlow(false);
-    setIsRevisionQuoteActive(false);
-    setRevisionBanner(null);
-    (async () => {
-      setLoading(true);
-      setError(null);
+    if (!workspaceId) return;
+    apiClient
+      .getProject(workspaceId)
+      .then((proj) => {
+        if (proj?.name && proj.name !== 'Renovation Project') {
+          setProjectName(proj.name);
+          try {
+            localStorage.setItem(`mr_project_name_${workspaceId}`, proj.name);
+          } catch {}
+        }
+      })
+      .catch(() => {});
+  }, [workspaceId]);
+
+  // Keep resolution valid when switching between image and video
+  useEffect(() => {
+    if (kind === 'image' && !['640px', '1k', '2k'].includes(resolution)) {
+      setResolution('640px');
+    } else if (kind === 'video' && !['480p', '720p'].includes(resolution)) {
+      setResolution('480p');
+    }
+  }, [kind, resolution]);
+
+  // Elapsed timer while a job is queued or rendering
+  const isJobRunning = jobState === 'queued' || jobState === 'rendering' || jobState === 'polling_provider';
+  useEffect(() => {
+    if (!isJobRunning) {
+      setSecondsElapsed(0);
+      return;
+    }
+    const start = Date.now();
+    const timer = window.setInterval(() => {
+      setSecondsElapsed(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isJobRunning, activeJobId]);
+
+  // Poll Magic Hour status when activeJobId is running
+  useEffect(() => {
+    if (!activeJobId || !isJobRunning) return;
+    let active = true;
+    let timeoutId: number | undefined;
+
+    const poll = async () => {
+      if (!active) return;
       try {
-        const proj = await reloadProjectAndRoomState(projectId, roomId);
-        if (!mounted) return;
-        if (!roomId && proj.rooms.length > 0) {
-          navigate(`/app/projects/${proj.id}/rooms/${proj.rooms[0].id}`, { replace: true });
-        }
-      } catch (err) {
-        if (mounted) {
-          if (err instanceof SafeAppClientError && (err.status === 404 || err.code === 'not_found')) {
-            navigate('/app', { replace: true });
-            return;
+        const snap = await apiClient.getGeneration(activeJobId, {
+          provider_id: providerId || undefined,
+          kind,
+          room_id: workspaceId,
+          resolution: jobResolution,
+          model: jobModel,
+        });
+        if (!active) return;
+
+        setJobState(snap.state);
+        if (snap.resolution) setJobResolution(snap.resolution);
+        if (snap.model) setJobModel(snap.model);
+
+        if (snap.state === 'ready_for_review') {
+          const bestDisplay = snap.output_data_url || snap.output_asset_url || snap.output_url || null;
+          const rawUrl = snap.output_url || snap.output_asset_url || bestDisplay;
+          if (bestDisplay) {
+            setOutputDisplayUrl(bestDisplay);
+            setOutputRawUrl(rawUrl);
+            try {
+              if (rawUrl) localStorage.setItem(`mr_output_url_${workspaceId}`, rawUrl);
+              if (snap.output_data_url) localStorage.setItem(`mr_output_data_${workspaceId}`, snap.output_data_url);
+            } catch {}
           }
-          setError(err instanceof SafeAppClientError ? err.message : 'Project not found.');
+          apiClient
+            .getConnectionStatus()
+            .then((conn) => setConnectionState(conn))
+            .catch(() => {});
+          setTimeout(() => {
+            resultSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }, 100);
+          return;
         }
-      } finally {
-        if (mounted) setLoading(false);
+
+        if (snap.state === 'failed' || snap.state === 'stopped') {
+          const errMsg =
+            (snap.last_safe_error as any)?.message ||
+            snap.events?.[0]?.safe_message ||
+            'Magic Hour encountered an error processing this request.';
+          setGenError(String(errMsg));
+          return;
+        }
+
+        timeoutId = window.setTimeout(poll, 2500);
+      } catch {
+        if (active) {
+          timeoutId = window.setTimeout(poll, 3500);
+        }
       }
-    })();
-    return () => {
-      mounted = false;
     };
-  }, [projectId, roomId, navigate, reloadProjectAndRoomState]);
 
-  const activeRoom = project?.rooms.find((r) => r.id === roomId) || project?.rooms[0];
+    timeoutId = window.setTimeout(poll, 1500);
+    return () => {
+      active = false;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [activeJobId, isJobRunning, providerId, kind, workspaceId, jobResolution, jobModel, setConnectionState]);
 
-  const handleAddRoom = async (name: string, roomType: string) => {
-    if (!project) return;
-    const rm = await apiClient.createRoom(project.id, name, roomType, project.rooms.length);
-    await reloadProjectAndRoomState(project.id, rm.id);
-    navigate(`/app/projects/${project.id}/rooms/${rm.id}`);
-  };
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
 
-  const handleUploadPhoto = async (file: File) => {
-    if (!project || !activeRoom) return;
+    setUploadError(null);
+    setGenError(null);
+
+    // Validate extension against Magic Hour's rules
+    const extMatch = file.name.match(/\.([a-z0-9]+)$/i);
+    const ext = extMatch ? extMatch[1].toLowerCase() : '';
+    if (ext && !ACCEPTED_EXTENSIONS.has(ext)) {
+      setUploadError(
+        `File ".${ext}" is not accepted by Magic Hour. Supported image formats: JPG, JPEG, PNG, WebP, and HEIC.`
+      );
+      return;
+    }
+
+    if (
+      file.type &&
+      (file.type.includes('gif') ||
+        file.type.includes('svg') ||
+        file.type.includes('pdf') ||
+        file.type.includes('video'))
+    ) {
+      setUploadError(
+        `File type "${file.type}" is not accepted by Magic Hour. Please attach a JPG, JPEG, PNG, WebP, or HEIC photo.`
+      );
+      return;
+    }
+
+    if (file.size > 15 * 1024 * 1024) {
+      setUploadError('Photo exceeds 15 MB limit. Please choose a smaller photo.');
+      return;
+    }
+
+    if (!connection?.connected) {
+      openConnectModal();
+      setUploadError('Please connect your Magic Hour API key at the top right first.');
+      return;
+    }
+
+    // Read local preview immediately so the user always sees their photo
     const reader = new FileReader();
-    reader.onload = (e) => {
-      const dataUrl = e.target?.result as string;
+    reader.onload = (ev) => {
+      const dataUrl = ev.target?.result as string;
       if (dataUrl) {
+        setOriginalPhotoUrl(dataUrl);
         try {
-          localStorage.setItem(`mr_photo_preview_${activeRoom.id}`, dataUrl);
+          localStorage.setItem(`mr_photo_preview_${workspaceId}`, dataUrl);
           localStorage.setItem('mr_photo_preview_latest', dataUrl);
         } catch {}
       }
     };
     reader.readAsDataURL(file);
 
-    const uploadedAsset = await apiClient.uploadRoomPhoto(activeRoom.id, file);
-    if (uploadedAsset?.file_path) {
-      localStorage.setItem(`mr_file_path_${activeRoom.id}`, uploadedAsset.file_path);
-    }
-    if (uploadedAsset?.thumbnail_url && uploadedAsset.thumbnail_url.startsWith('data:')) {
-      try {
-        localStorage.setItem(`mr_photo_preview_${activeRoom.id}`, uploadedAsset.thumbnail_url);
-        localStorage.setItem('mr_photo_preview_latest', uploadedAsset.thumbnail_url);
-      } catch {}
-    }
-    await reloadProjectAndRoomState(project.id, activeRoom.id);
-  };
-
-  const handleSaveBrief = async (payload: {
-    raw_text: string;
-    preserve: string[];
-    layout_mode: 'preserve' | 'conceptual_change';
-    resolve_conflicts?: string[];
-    accepted_reference_asset_id?: string | null;
-  }): Promise<BriefRevisionResponse | void> => {
-    if (!project || !activeRoom) return;
-    const isRevision = Boolean(activeBrief && jobSnapshot);
-    const rev = await apiClient.saveRoomBrief(activeRoom.id, payload);
-    if (rev?.compiled_prompt) {
-      localStorage.setItem(`mr_brief_prompt_${activeRoom.id}`, rev.compiled_prompt);
-    }
-    setActiveBrief(rev);
-    await reloadProjectAndRoomState(project.id, activeRoom.id);
-    if (isRevision && !rev.has_unresolved_conflicts) {
-      setIsRevisionQuoteActive(true);
-      setHasEnteredQuoteFlow(true);
-      setAutoQuoteNonce((n) => n + 1);
-      setRevisionBanner(
-        `Revision #${rev.revision_number} ready! Pick Photo or Video and confirm your credit quote below to run it.`
-      );
-      scrollToFlowTop();
-    }
-    return rev;
-  };
-
-  const handleEnsureBriefSaved = useCallback(async (): Promise<BriefRevisionResponse | null> => {
-    if (!project || !activeRoom) return activeBrief;
-    if (draftBrief && draftBrief.isDirty && draftBrief.raw_text.trim()) {
-      const rev = await apiClient.saveRoomBrief(activeRoom.id, {
-        raw_text: draftBrief.raw_text.trim(),
-        preserve: draftBrief.preserve,
-        layout_mode: draftBrief.layout_mode,
-        resolve_conflicts: [
-          'doors',
-          'windows',
-          'island',
-          'island position',
-          'appliance',
-          'appliance positions',
-          'ceiling',
-          'ceiling height',
-          'room footprint',
-          'camera viewpoint',
-          'walls',
-          'flooring',
-          'cabinets',
-          'countertops',
-          'lighting',
-          'hardware',
-          'room finish',
-        ],
-      });
-      if (rev?.compiled_prompt) {
-        localStorage.setItem(`mr_brief_prompt_${activeRoom.id}`, rev.compiled_prompt);
-      }
-      setActiveBrief(rev);
-      await reloadProjectAndRoomState(project.id, activeRoom.id);
-      return rev;
-    }
-    return activeBrief;
-  }, [project, activeRoom, activeBrief, draftBrief, reloadProjectAndRoomState]);
-
-  const handleQuickRevise = async (
-    notes: string,
-    kind: 'image' | 'video',
-    referenceAssetId?: string
-  ) => {
-    if (!project || !activeRoom || !notes.trim()) return;
-    const rev = await apiClient.saveRoomBrief(activeRoom.id, {
-      raw_text: notes.trim().slice(0, 2000),
-      preserve: activeBrief?.brief?.preserve || [
-        'Room footprint',
-        'Camera viewpoint',
-        'Doors',
-        'Windows',
-        'Ceiling height',
-      ],
-      layout_mode: activeBrief?.brief?.layout_mode || 'preserve',
-      resolve_conflicts: [
-        'doors',
-        'windows',
-        'island',
-        'island position',
-        'appliance',
-        'appliance positions',
-        'ceiling',
-        'ceiling height',
-        'room footprint',
-        'camera viewpoint',
-        'walls',
-        'flooring',
-        'cabinets',
-        'countertops',
-        'lighting',
-        'hardware',
-        'room finish',
-      ],
-      parent_revision_id: activeBrief?.id || null,
-      accepted_reference_asset_id:
-        referenceAssetId ||
-        (kind === 'image'
-          ? stillAssetId || activeRoom.accepted_image_asset_id || null
-          : activeRoom.accepted_image_asset_id || null),
-    });
-    setActiveBrief(rev);
-    setSelectedKind(kind);
-    setIsRevisionQuoteActive(true);
-    setHasEnteredQuoteFlow(true);
-    await reloadProjectAndRoomState(project.id, activeRoom.id);
-    setAutoQuoteNonce((n) => n + 1);
-    setRevisionBanner(
-      `Revision #${rev.revision_number} ready! Pick Photo or Video and confirm your credit quote below to run it on Magic Hour.`
-    );
-    scrollToFlowTop();
-  };
-
-  const handleJobStarted = (admission: GenerationAdmissionResponse) => {
-    setIsRevisionQuoteActive(false);
-    setHasEnteredQuoteFlow(true);
-    setAutoQuoteNonce(0);
-    setRevisionBanner(null);
-    setActiveJobId(admission.job_id);
-    if (activeRoom && typeof window !== 'undefined') {
-      localStorage.setItem(`mr_active_job_${activeRoom.id}`, admission.job_id);
-      if (admission.provider_id) {
-        localStorage.setItem(`mr_provider_id_${admission.job_id}`, admission.provider_id);
-      }
-    }
-    const initialKind = (admission.kind || selectedKind) as 'image' | 'video';
-    const initialRes = admission.resolution || (initialKind === 'image' ? '640px' : '480p');
-    const initialModel = admission.model || (initialKind === 'image' ? 'qwen-edit' : 'kling-v1');
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(`mr_resolution_${admission.job_id}`, initialRes);
-      localStorage.setItem(`mr_model_${admission.job_id}`, initialModel);
-    }
-    setJobSnapshot({
-      job_id: admission.job_id,
-      id: admission.job_id,
-      provider_id: admission.provider_id,
-      project_id: project?.id || 'default',
-      room_id: activeRoom?.id || 'default',
-      kind: initialKind,
-      state: 'queued',
-      provider_state: 'queued',
-      permitted_next_action: 'wait',
-      model: initialModel,
-      resolution: initialRes,
-      output_asset_url: null,
-      events: [
-        {
-          sequence: 1,
-          job_id: admission.job_id,
-          state: 'queued',
-          safe_message: 'Job submitted to Magic Hour.',
-          timestamp: new Date().toISOString(),
-          payload: {},
-        },
-      ],
-    } as any);
-    scrollToFlowTop();
-  };
-
-  const handleJobUpdated = useCallback(
-    async (snap: GenerationSnapshotResponse) => {
-      const prevState = jobSnapshot?.state;
-      setJobSnapshot(snap);
-      if (activeRoom && snap.output_asset_url && typeof window !== 'undefined') {
-        localStorage.setItem(`mr_output_url_${activeRoom.id}`, snap.output_asset_url);
-      }
-      if (snap.state === 'ready_for_review' || snap.state === 'accepted') {
-        if (projectId) {
-          try {
-            await reloadProjectAndRoomState(projectId, roomId);
-          } catch {
-            // Ignore
-          }
-        }
+    setUploadingPhoto(true);
+    try {
+      const uploaded = await apiClient.uploadRoomPhoto(workspaceId, file);
+      if (uploaded?.file_path) {
+        setFilePath(uploaded.file_path);
         try {
-          const conn = await apiClient.getConnectionStatus();
-          setConnectionState(conn);
-        } catch {
-          // Ignore
-        }
-        if (prevState !== snap.state) {
-          scrollToFlowTop();
-        }
+          localStorage.setItem(`mr_file_path_${workspaceId}`, uploaded.file_path);
+        } catch {}
       }
-    },
-    [jobSnapshot?.state, activeRoom, projectId, roomId, reloadProjectAndRoomState, scrollToFlowTop, setConnectionState]
-  );
-
-  const handleReviewed = async (review: ReviewResponse) => {
-    if (!project || !activeRoom) return;
-    await reloadProjectAndRoomState(project.id, activeRoom.id);
-    try {
-      const conn = await apiClient.getConnectionStatus();
-      setConnectionState(conn);
-    } catch {
-      // Ignore
-    }
-    if (review.decision === 'revise') {
-      if (jobSnapshot?.kind) {
-        setSelectedKind(jobSnapshot.kind);
-      }
-      setIsRevisionQuoteActive(true);
-      setHasEnteredQuoteFlow(true);
-      setAutoQuoteNonce((n) => n + 1);
-      setRevisionBanner(
-        'Revision ready! Pick Photo or Video and click Confirm & Spend below to run your revision on Magic Hour.'
-      );
-      scrollToFlowTop();
-    } else if (review.decision === 'accept') {
-      setIsRevisionQuoteActive(false);
-      setAutoQuoteNonce(0);
-      setRevisionBanner(null);
-      scrollToFlowTop();
-    } else {
-      setIsRevisionQuoteActive(false);
-      setAutoQuoteNonce(0);
-      scrollToFlowTop();
-    }
-  };
-
-  const handleAssemblePresentation = async (
-    title: string,
-    orderedClips: PresentationClipItem[],
-    includeConceptLabel: boolean
-  ) => {
-    if (!project) return;
-    setIsAssembling(true);
-    setError(null);
-    try {
-      const job = await apiClient.createPresentation(project.id, title, orderedClips, includeConceptLabel);
-      let exp = await apiClient.getExport(job.export_id);
-      setExportData(exp);
-      for (let i = 0; i < 20 && (exp.status === 'queued' || exp.status === 'rendering'); i++) {
-        await new Promise((r) => setTimeout(r, 350));
-        exp = await apiClient.getExport(job.export_id);
-        setExportData(exp);
+      if (uploaded?.thumbnail_url && uploaded.thumbnail_url.startsWith('data:')) {
+        setOriginalPhotoUrl(uploaded.thumbnail_url);
+        try {
+          localStorage.setItem(`mr_photo_preview_${workspaceId}`, uploaded.thumbnail_url);
+          localStorage.setItem('mr_photo_preview_latest', uploaded.thumbnail_url);
+        } catch {}
       }
     } catch (err) {
-      setError(err instanceof SafeAppClientError ? err.message : 'Failed to assemble presentation.');
+      setUploadError(
+        err instanceof SafeAppClientError
+          ? err.message
+          : 'Failed to upload photo to Magic Hour. Please check your API key and try again.'
+      );
     } finally {
-      setIsAssembling(false);
+      setUploadingPhoto(false);
     }
   };
 
-  const handleRefreshExport = async () => {
-    if (!exportData) return;
-    const exp = await apiClient.getExport(exportData.export_id);
-    setExportData(exp);
+  const estimatedCredits =
+    kind === 'video'
+      ? resolution === '480p'
+        ? 120
+        : 240
+      : resolution === '640px'
+      ? 10
+      : resolution === '1k'
+      ? 20
+      : 40;
+
+  const handleGenerate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (submitting || isJobRunning) return;
+
+    if (!connection?.connected) {
+      openConnectModal();
+      setGenError('Please connect your Magic Hour API key first.');
+      return;
+    }
+
+    if (!filePath) {
+      setGenError('Please attach a photo in Step 1 first so Magic Hour has an image to edit.');
+      return;
+    }
+
+    const trimmedPrompt = prompt.trim();
+    if (!trimmedPrompt) {
+      setGenError('Please enter a prompt describing how you want to renovate or edit the photo.');
+      return;
+    }
+
+    setSubmitting(true);
+    setGenError(null);
+    setDownloadNotice(null);
+    setIsApproved(false);
+    try {
+      localStorage.setItem(`mr_brief_prompt_${workspaceId}`, trimmedPrompt);
+      localStorage.removeItem(`mr_approved_${workspaceId}`);
+    } catch {}
+
+    const chosenModel = kind === 'image' ? 'qwen-edit' : 'kling-v1';
+    const chosenResolution = resolution;
+
+    try {
+      const quoteId = `quo_${Date.now()}`;
+      const idempotencyKey = `idemp_${Date.now()}`;
+      const admission = await apiClient.startGeneration(quoteId, idempotencyKey, {
+        kind,
+        resolution: chosenResolution,
+        model: chosenModel,
+        file_path: filePath,
+        prompt: trimmedPrompt,
+        room_id: workspaceId,
+      });
+
+      setActiveJobId(admission.job_id);
+      setProviderId(admission.provider_id || null);
+      setJobModel(chosenModel);
+      setJobResolution(chosenResolution);
+      setJobState('queued');
+
+      try {
+        localStorage.setItem(`mr_active_job_${workspaceId}`, admission.job_id);
+        if (admission.provider_id) {
+          localStorage.setItem(`mr_provider_id_${admission.job_id}`, admission.provider_id);
+        }
+        localStorage.setItem(`mr_resolution_${admission.job_id}`, chosenResolution);
+        localStorage.setItem(`mr_model_${admission.job_id}`, chosenModel);
+      } catch {}
+    } catch (err) {
+      setGenError(
+        err instanceof SafeAppClientError
+          ? err.message
+          : 'Could not start Magic Hour generation. Please check your API key and credit balance.'
+      );
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  if (loading) {
-    return (
-      <main style={{ padding: '24px' }} aria-live="polite">
-        Loading workspace…
-      </main>
-    );
-  }
+  const handleApproveAndDownload = () => {
+    if (!outputDisplayUrl) return;
+    setIsApproved(true);
+    try {
+      localStorage.setItem(`mr_approved_${workspaceId}`, '1');
+    } catch {}
 
-  if (error || !project) {
-    return (
-      <main style={{ padding: '24px' }}>
-        <div className="alert alert-error" role="alert">
-          {error || 'Project not found.'}
-        </div>
-      </main>
-    );
-  }
+    const safeName = projectName.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'renovation';
+    const ext = kind === 'video' ? 'mp4' : 'jpg';
+    const filename = `${safeName}-renovated.${ext}`;
 
-  const storedOutputUrl =
-    typeof window !== 'undefined' && activeRoom ? localStorage.getItem(`mr_output_url_${activeRoom.id}`) : null;
-
-  const rawStillCompareUrl =
-    (jobSnapshot?.kind === 'image' && jobSnapshot.output_asset_url) ||
-    activeRoom?.accepted_image_url ||
-    storedOutputUrl ||
-    null;
-
-  const stillAssetId =
-    (jobSnapshot?.kind === 'image' && jobSnapshot.output_asset_id) ||
-    activeRoom?.accepted_image_asset_id ||
-    null;
-
-  const stillCompareUrl = rawStillCompareUrl || null;
-
-  const beforePhotoUrl =
-    (typeof window !== 'undefined' && activeRoom ? localStorage.getItem(`mr_photo_preview_${activeRoom.id}`) : null) ||
-    (typeof window !== 'undefined' ? localStorage.getItem('mr_photo_preview_latest') : null) ||
-    activeRoom?.thumbnail_url ||
-    null;
-
-  const stillReviewAssetId =
-    jobSnapshot?.kind === 'image' &&
-    jobSnapshot.state === 'ready_for_review' &&
-    jobSnapshot.output_asset_id
-      ? jobSnapshot.output_asset_id
-      : null;
-
-  const videoClipUrl =
-    (jobSnapshot?.kind === 'video' && jobSnapshot.output_asset_url) ||
-    activeRoom?.accepted_clip_url ||
-    null;
-
-  const videoClipAssetId =
-    (jobSnapshot?.kind === 'video' && jobSnapshot.output_asset_id) ||
-    activeRoom?.accepted_clip_asset_id ||
-    null;
-
-  const canReviewVideo = Boolean(
-    jobSnapshot?.kind === 'video' &&
-      jobSnapshot.state === 'ready_for_review' &&
-      jobSnapshot.output_asset_id
-  );
-
-  const hasAnyAcceptedClip = project.rooms.some((r) => Boolean(r.accepted_clip_asset_id));
-  const hasApprovedMediaForRoom = Boolean(
-    activeRoom?.accepted_image_url || activeRoom?.accepted_clip_url
-  );
-  const isCurrentOutputApproved = Boolean(
-    hasApprovedMediaForRoom &&
-      !isRevisionQuoteActive &&
-      jobSnapshot?.state === 'accepted'
-  );
-
-  const isJobRunning = Boolean(
-    activeJobId &&
-      (!jobSnapshot ||
-        [
-          'admitted',
-          'preparing',
-          'submitting',
-          'submission_unknown',
-          'queued',
-          'rendering',
-          'saving_output',
-          'polling_provider',
-        ].includes(jobSnapshot.state))
-  );
-
-  const isSwitchingToUngeneratedVideo = Boolean(
-    selectedKind === 'video' &&
-      jobSnapshot &&
-      jobSnapshot.kind !== 'video' &&
-      !activeRoom?.accepted_clip_asset_id
-  );
-
-  const isSwitchingToUngeneratedImage = Boolean(
-    selectedKind === 'image' &&
-      jobSnapshot &&
-      jobSnapshot.kind !== 'image' &&
-      !stillCompareUrl
-  );
-
-  const showReviewAndOutput = Boolean(
-    !isJobRunning &&
-      (jobSnapshot?.state === 'ready_for_review' ||
-        jobSnapshot?.state === 'accepted' ||
-        Boolean(stillCompareUrl) ||
-        Boolean(videoClipUrl))
-  );
-
-  const shouldShowQuoteCard = Boolean(
-    !isJobRunning &&
-      !showReviewAndOutput &&
-      (!jobSnapshot ||
-        isRevisionQuoteActive ||
-        ['failed', 'stopped', 'blocked_credits', 'waiting_for_key'].includes(jobSnapshot.state) ||
-        isSwitchingToUngeneratedVideo ||
-        isSwitchingToUngeneratedImage)
-  );
-
-  // Only show Step 1 (Upload Photo) and Step 2 (Brief Editor) before the user enters the quote/generation/review flow
-  const showInitialSetup = Boolean(
-    !activeJobId && !jobSnapshot && !isRevisionQuoteActive && !hasEnteredQuoteFlow
-  );
-
-  const mediaSelectorCard = (
-    <div
-      className="card"
-      style={{ marginBottom: '16px', padding: '16px 20px' }}
-      data-testid="media-kind-selector"
-    >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
-        <div>
-          <strong style={{ fontSize: '1rem' }}>Do You Want a Photo or a Video?</strong>
-          <p className="field-helper" style={{ margin: '2px 0 0 0' }}>
-            Pick whether you want Magic Hour to generate a renovated photo or a room video clip.
-          </p>
-        </div>
-        <div style={{ display: 'flex', gap: '8px' }} role="group" aria-label="Output format">
-          <button
-            type="button"
-            className={`btn ${selectedKind === 'image' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => {
-              setSelectedKind('image');
-              scrollToFlowTop();
-            }}
-            data-testid="select-kind-image"
-          >
-            Photo (Still Image)
-          </button>
-          <button
-            type="button"
-            className={`btn ${selectedKind === 'video' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => {
-              setSelectedKind('video');
-              scrollToFlowTop();
-            }}
-            data-testid="select-kind-video"
-          >
-            Video (Room Clip)
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+    triggerBrowserDownload(outputDisplayUrl, outputRawUrl, filename);
+    setDownloadNotice(`Approved! "${filename}" is downloading to your device.`);
+  };
 
   return (
-    <div>
-      <div className="workspace-grid">
-        <RoomList
-          rooms={project.rooms}
-          activeRoomId={activeRoom?.id}
-          onSelectRoom={(id) => navigate(`/app/projects/${project.id}/rooms/${id}`)}
-          onAddRoom={handleAddRoom}
-          canAddRoom={project.rooms.length < 5}
-        />
+    <main style={{ maxWidth: '960px', margin: '0 auto', padding: '24px', width: '100%' }}>
+      {/* Top Bar */}
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '12px',
+          marginBottom: '20px',
+        }}
+      >
+        <div>
+          <Link
+            to="/app"
+            style={{ color: 'var(--text-muted)', textDecoration: 'none', fontSize: '0.9rem', fontWeight: 500 }}
+          >
+            &larr; Back to Projects
+          </Link>
+          <h1 style={{ margin: '4px 0 0 0', fontSize: '1.65rem' }}>{projectName}</h1>
+        </div>
+      </div>
 
-        <section ref={flowTopRef}>
-          {activeRoom ? (
-            <>
-              {/* Initial Setup: Upload Photo + Renovation Brief (disappears once user calculates quote or runs/revises) */}
-              {showInitialSetup && (
-                <>
-                  <RoomViewer room={activeRoom} onUploadPhoto={handleUploadPhoto} />
-                  <BriefEditor
-                    activeBrief={activeBrief}
-                    onSaveBrief={handleSaveBrief}
-                    onDraftChange={setDraftBrief}
-                  />
-                </>
+      {/* STEP 1: Attach Photo */}
+      <section className="card" style={{ marginBottom: '20px' }}>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '12px',
+            marginBottom: '12px',
+          }}
+        >
+          <div>
+            <h2 style={{ margin: 0, fontSize: '1.2rem' }}>1. Attach Photo</h2>
+            <p className="field-helper" style={{ margin: '4px 0 0 0' }}>
+              Accepted by Magic Hour: <strong>JPG, JPEG, PNG, WebP, HEIC</strong> (up to 15 MB).
+            </p>
+          </div>
+          <label
+            className="btn btn-primary"
+            style={{ cursor: uploadingPhoto ? 'wait' : 'pointer', display: 'inline-block' }}
+          >
+            {uploadingPhoto ? 'Uploading to Magic Hour…' : originalPhotoUrl ? 'Replace Photo' : 'Attach Photo'}
+            <input
+              type="file"
+              accept=".jpg,.jpeg,.png,.webp,.heic,.heif,image/jpeg,image/png,image/webp,image/heic"
+              onChange={handleFileChange}
+              disabled={uploadingPhoto}
+              style={{ display: 'none' }}
+              data-testid="room-photo-input"
+            />
+          </label>
+        </div>
+
+        {uploadError && (
+          <div className="alert alert-error" role="alert" style={{ marginBottom: '12px' }}>
+            {uploadError}
+          </div>
+        )}
+
+        {filePath && !uploadingPhoto && !uploadError && (
+          <div style={{ marginBottom: '12px' }}>
+            <span className="badge badge-connected">
+              &#10003; Photo accepted &amp; uploaded to Magic Hour
+            </span>
+          </div>
+        )}
+
+        {originalPhotoUrl && (
+          <div style={{ marginTop: '8px' }}>
+            <img
+              src={originalPhotoUrl}
+              alt="Attached original"
+              style={{
+                maxWidth: '100%',
+                maxHeight: '380px',
+                objectFit: 'contain',
+                borderRadius: '8px',
+                border: '1px solid var(--border)',
+                background: '#1c1917',
+                display: 'block',
+              }}
+            />
+          </div>
+        )}
+      </section>
+
+      {/* STEP 2: Prompt & Generate */}
+      <section className="card" style={{ marginBottom: '20px' }}>
+        <h2 style={{ margin: '0 0 12px 0', fontSize: '1.2rem' }}>2. Renovation Prompt &amp; Generate</h2>
+        <form onSubmit={handleGenerate}>
+          <div style={{ marginBottom: '14px' }}>
+            <label htmlFor="renovation-prompt" className="field-label">
+              Describe your renovation or edit
+            </label>
+            <textarea
+              id="renovation-prompt"
+              className="textarea-input"
+              rows={3}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="e.g., Modern dorm room with warm oak desk, cozy warm lighting, clean white walls, and indoor plants"
+              required
+            />
+          </div>
+
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+              gap: '14px',
+              marginBottom: '16px',
+            }}
+          >
+            <div>
+              <label htmlFor="output-format" className="field-label">
+                Output Type
+              </label>
+              <select
+                id="output-format"
+                className="select-input"
+                value={kind}
+                onChange={(e) => setKind(e.target.value as 'image' | 'video')}
+                disabled={isJobRunning}
+              >
+                <option value="image">Photo (Still Image · qwen-edit)</option>
+                <option value="video">Video Walkthrough (5s Clip · kling-v1)</option>
+              </select>
+            </div>
+
+            <div>
+              <label htmlFor="output-resolution" className="field-label">
+                Resolution &amp; Credit Cost
+              </label>
+              {kind === 'image' ? (
+                <select
+                  id="output-resolution"
+                  className="select-input"
+                  value={resolution}
+                  onChange={(e) => setResolution(e.target.value)}
+                  disabled={isJobRunning}
+                >
+                  <option value="640px">640px (10 Credits)</option>
+                  <option value="1k">1k (20 Credits)</option>
+                  <option value="2k">2k (40 Credits)</option>
+                </select>
+              ) : (
+                <select
+                  id="output-resolution"
+                  className="select-input"
+                  value={resolution}
+                  onChange={(e) => setResolution(e.target.value)}
+                  disabled={isJobRunning}
+                >
+                  <option value="480p">480p (120 Credits)</option>
+                  <option value="720p">720p (240 Credits)</option>
+                </select>
               )}
+            </div>
+          </div>
 
-              {/* Active Quote / Revision Step: Photo vs Video choice + Confirm & Spend (Run It) */}
-              {shouldShowQuoteCard && (
-                <>
-                  {revisionBanner && (
-                    <div
-                      className="alert alert-success"
-                      role="status"
-                      data-testid="revision-quote-banner"
-                      style={{ marginBottom: '16px' }}
-                    >
-                      <strong>{revisionBanner}</strong>
-                    </div>
-                  )}
+          {genError && (
+            <div className="alert alert-error" role="alert" style={{ marginBottom: '14px' }}>
+              {genError}
+            </div>
+          )}
 
-                  {mediaSelectorCard}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={submitting || isJobRunning || uploadingPhoto}
+              data-testid="generate-btn"
+            >
+              {submitting
+                ? 'Sending to Magic Hour…'
+                : isJobRunning
+                ? `Generating on Magic Hour (${secondsElapsed}s)…`
+                : `Generate with Magic Hour (${estimatedCredits} Credits)`}
+            </button>
+            <span className="field-helper" style={{ margin: 0 }}>
+              Model: <code>{kind === 'image' ? 'qwen-edit' : 'kling-v1'}</code> &middot; Resolution:{' '}
+              <code>{resolution}</code>
+            </span>
+          </div>
+        </form>
+      </section>
 
-                  {selectedKind === 'image' ? (
-                    <QuoteCard
-                      kind="image"
-                      room={activeRoom}
-                      briefRevision={activeBrief}
-                      hasUnsavedBrief={Boolean(draftBrief?.isDirty)}
-                      onEnsureBriefSaved={handleEnsureBriefSaved}
-                      autoQuoteNonce={autoQuoteNonce}
-                      onQuoteReady={() => {
-                        setHasEnteredQuoteFlow(true);
-                        scrollToFlowTop();
-                      }}
-                      onJobStarted={handleJobStarted}
-                    />
-                  ) : (
-                    <QuoteCard
-                      kind="video"
-                      room={activeRoom}
-                      briefRevision={activeBrief}
-                      hasUnsavedBrief={Boolean(draftBrief?.isDirty)}
-                      onEnsureBriefSaved={handleEnsureBriefSaved}
-                      autoQuoteNonce={autoQuoteNonce}
-                      onQuoteReady={() => {
-                        setHasEnteredQuoteFlow(true);
-                        scrollToFlowTop();
-                      }}
-                      onJobStarted={handleJobStarted}
-                    />
-                  )}
-                </>
-              )}
+      {/* STEP 3: Live Progress Indicator while running */}
+      {isJobRunning && (
+        <section className="card" style={{ marginBottom: '20px' }} aria-live="polite">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+            <div>
+              <h3 style={{ margin: 0 }}>Generating Your Renovation on Magic Hour…</h3>
+              <p className="field-helper" style={{ margin: '4px 0 0 0' }}>
+                Model: <code>{jobModel}</code> &middot; Resolution: <code>{jobResolution}</code> &middot; Elapsed:{' '}
+                <strong>{secondsElapsed}s</strong> (typically takes 15–35 seconds)
+              </p>
+            </div>
+            <span className="badge badge-neutral">State: {jobState}</span>
+          </div>
+        </section>
+      )}
 
-              {/* Active Loading Step: Generation Progress (only shown while job is running or failed/blocked) */}
-              {activeJobId && (isJobRunning || !shouldShowQuoteCard) && (
-                <JobTimeline
-                  jobId={activeJobId}
-                  providerId={
-                    jobSnapshot?.provider_id ||
-                    (typeof window !== 'undefined'
-                      ? localStorage.getItem(`mr_provider_id_${activeJobId}`) || undefined
-                      : undefined)
-                  }
-                  kind={jobSnapshot?.kind || selectedKind}
-                  roomId={activeRoom.id}
-                  onJobUpdated={handleJobUpdated}
+      {/* STEP 4: Generated Result & One-Click Approve + Automatic Download */}
+      {outputDisplayUrl && (
+        <section ref={resultSectionRef} className="card" style={{ marginBottom: '24px' }} data-testid="result-section">
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '12px',
+              marginBottom: '16px',
+            }}
+          >
+            <div>
+              <h2 style={{ margin: 0, fontSize: '1.25rem' }}>3. Your Renovated Result ({projectName})</h2>
+              <p className="field-helper" style={{ margin: '4px 0 0 0' }}>
+                Model: <code>{jobModel}</code> &middot; Resolution: <code>{jobResolution}</code>
+              </p>
+            </div>
+            {isApproved && (
+              <span className="badge badge-connected" data-testid="approved-badge">
+                &#10003; Approved &amp; Downloaded
+              </span>
+            )}
+          </div>
+
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+              gap: '16px',
+              marginBottom: '20px',
+            }}
+          >
+            {originalPhotoUrl && (
+              <figure style={{ margin: 0 }}>
+                <figcaption className="field-helper" style={{ fontWeight: 600, marginBottom: '6px' }}>
+                  Original Photo
+                </figcaption>
+                <img
+                  src={originalPhotoUrl}
+                  alt="Original"
+                  style={{
+                    width: '100%',
+                    maxHeight: '480px',
+                    objectFit: 'contain',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border)',
+                    background: '#1c1917',
+                    display: 'block',
+                  }}
+                />
+              </figure>
+            )}
+
+            <figure style={{ margin: 0 }}>
+              <figcaption className="field-helper" style={{ fontWeight: 600, marginBottom: '6px' }}>
+                Renovated Result
+              </figcaption>
+              {kind === 'video' || outputDisplayUrl.endsWith('.mp4') ? (
+                <video
+                  key={outputDisplayUrl}
+                  src={outputDisplayUrl}
+                  controls
+                  autoPlay
+                  loop
+                  style={{
+                    width: '100%',
+                    maxHeight: '480px',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border)',
+                    background: '#1c1917',
+                    display: 'block',
+                  }}
+                />
+              ) : (
+                <img
+                  key={outputDisplayUrl}
+                  src={outputDisplayUrl}
+                  alt="Renovated Result"
+                  style={{
+                    width: '100%',
+                    maxHeight: '480px',
+                    objectFit: 'contain',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border)',
+                    background: '#1c1917',
+                    display: 'block',
+                  }}
+                  onError={(e) => {
+                    const target = e.currentTarget;
+                    const fallbackSource = outputRawUrl || outputDisplayUrl;
+                    if (!target.dataset.proxyTried && fallbackSource && fallbackSource.startsWith('http')) {
+                      target.dataset.proxyTried = 'true';
+                      target.src = `/api/proxy-image?url=${encodeURIComponent(fallbackSource)}`;
+                    }
+                  }}
                 />
               )}
+            </figure>
+          </div>
 
-              {/* Review & Approved Step: Shown right in front of the user when ready_for_review or accepted */}
-              {showReviewAndOutput && (
-                <>
-                  {stillCompareUrl && (
-                    <div className="card" style={{ marginBottom: '20px' }}>
-                      <ImageCompare
-                        beforeUrl={beforePhotoUrl || activeRoom?.thumbnail_url || ''}
-                        afterUrl={stillCompareUrl}
-                        roomName={activeRoom.name}
-                      />
-                      {stillReviewAssetId ? (
-                        <ReviewChecklist
-                          assetId={stillReviewAssetId}
-                          kind="image"
-                          onReviewed={handleReviewed}
-                        />
-                      ) : (
-                        <div style={{ marginTop: '14px' }}>
-                          {isCurrentOutputApproved && activeRoom.accepted_image_asset_id && (
-                            <div style={{ marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                              <span className="badge badge-connected" data-testid="still-accepted-badge">
-                                Photo Approved — Ready to Download Below (Video Unlocked)
-                              </span>
-                            </div>
-                          )}
-                          <form
-                            onSubmit={async (e) => {
-                              e.preventDefault();
-                              if (!quickPhotoReviseNotes.trim() || revisingPhoto) return;
-                              setRevisingPhoto(true);
-                              try {
-                                await handleQuickRevise(
-                                  quickPhotoReviseNotes.trim(),
-                                  'image',
-                                  stillAssetId || undefined
-                                );
-                                setQuickPhotoReviseNotes('');
-                              } finally {
-                                setRevisingPhoto(false);
-                              }
-                            }}
-                            style={{
-                              padding: '12px',
-                              borderRadius: '8px',
-                              background: 'var(--surface-subtle)',
-                              border: '1px solid var(--border)',
-                              display: 'flex',
-                              gap: '8px',
-                              flexWrap: 'wrap',
-                              alignItems: 'center',
-                            }}
-                          >
-                            <input
-                              type="text"
-                              className="text-input"
-                              style={{ flex: '1 1 240px' }}
-                              placeholder="Want to revise this photo? Describe changes and recalculate credit quote…"
-                              value={quickPhotoReviseNotes}
-                              onChange={(e) => setQuickPhotoReviseNotes(e.target.value)}
-                              data-testid="quick-revise-image-input"
-                            />
-                            <button
-                              type="submit"
-                              className="btn btn-secondary"
-                              disabled={revisingPhoto || !quickPhotoReviseNotes.trim()}
-                              data-testid="quick-revise-image-btn"
-                            >
-                              {revisingPhoto ? 'Recalculating…' : 'Send Revision & Recalculate Quote'}
-                            </button>
-                          </form>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {videoClipUrl && videoClipAssetId && (
-                    <VideoReview
-                      clipAssetId={videoClipAssetId}
-                      clipUrl={videoClipUrl}
-                      approvedStillUrl={activeRoom.accepted_image_url || stillCompareUrl}
-                      roomName={activeRoom.name}
-                      isAccepted={Boolean(isCurrentOutputApproved && activeRoom.accepted_clip_asset_id === videoClipAssetId)}
-                      canReview={canReviewVideo}
-                      onReviewed={handleReviewed}
-                      onQuickRevise={handleQuickRevise}
-                    />
-                  )}
-
-                  {/* End-of-page Approved Download Section + Next Format Selector */}
-                  {isCurrentOutputApproved && (
-                    <>
-                      <section
-                        className="card"
-                        aria-labelledby="approved-download-heading"
-                        data-testid="approved-download-section"
-                        style={{
-                          marginBottom: '20px',
-                          background: 'var(--success-bg)',
-                          borderColor: 'var(--success-border)',
-                        }}
-                      >
-                        <h3 id="approved-download-heading" style={{ margin: '0 0 6px', color: 'var(--success-text)' }}>
-                          5. Approved — Download Your Renovation Output
-                        </h3>
-                        <p style={{ margin: '0 0 14px', color: 'var(--success-text)', fontSize: '0.95rem' }}>
-                          You approved of your generated renovation output! You can now download your files below.
-                        </p>
-                        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-                          {activeRoom.accepted_image_url && (
-                            <a
-                              href={`${activeRoom.accepted_image_url}&download=1`}
-                              download={`${activeRoom.name.toLowerCase().replace(/\s+/g, '_')}_renovated_photo.jpg`}
-                              className="btn btn-primary"
-                              data-testid="download-approved-photo"
-                            >
-                              Download Approved Photo (.jpg)
-                            </a>
-                          )}
-                          {activeRoom.accepted_clip_url && (
-                            <a
-                              href={`${activeRoom.accepted_clip_url}&download=1`}
-                              download={`${activeRoom.name.toLowerCase().replace(/\s+/g, '_')}_renovated_video.mp4`}
-                              className="btn btn-primary"
-                              data-testid="download-approved-video"
-                            >
-                              Download Approved Video (.mp4)
-                            </a>
-                          )}
-                        </div>
-                      </section>
-
-                      {mediaSelectorCard}
-                    </>
-                  )}
-
-                  {hasAnyAcceptedClip && (
-                    <ClipOrderer
-                      rooms={project.rooms}
-                      initialTitle={`${project.name} Presentation`}
-                      isAssembling={isAssembling}
-                      onAssemble={handleAssemblePresentation}
-                    />
-                  )}
-
-                  <ExportPanel exportData={exportData} onRefresh={handleRefreshExport} />
-                </>
-              )}
-            </>
-          ) : (
-            <div className="card">Add a room on the left to begin.</div>
+          {downloadNotice && (
+            <div className="alert alert-success" role="status" style={{ marginBottom: '14px' }}>
+              <strong>{downloadNotice}</strong>
+            </div>
           )}
+
+          <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={handleApproveAndDownload}
+              data-testid="approve-download-btn"
+            >
+              &#10003; {isApproved ? 'Download Renovated Picture Again' : 'Approve & Automatically Download Picture'}
+            </button>
+          </div>
         </section>
-      </div>
-    </div>
+      )}
+    </main>
   );
 }

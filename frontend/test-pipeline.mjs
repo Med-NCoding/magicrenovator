@@ -197,6 +197,15 @@ async function runTests() {
         })
       };
     }
+    if (url.includes('images.magichour.ai/output_640.jpg')) {
+      const dummyBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (k) => k.toLowerCase() === 'content-type' ? 'image/jpeg' : null },
+        arrayBuffer: async () => dummyBytes.buffer
+      };
+    }
     return originalFetch(url, options);
   };
 
@@ -216,16 +225,26 @@ async function runTests() {
 
   globalThis.fetch = originalFetch;
 
-  console.log(`Test 6 Sent to MH resolution: ${sentMhPayload?.resolution}, Status API resolution: ${t6Poll.data?.resolution}`);
-  if (sentMhPayload?.resolution === '640px' && t6Poll.data?.resolution === '640px') {
-    console.log('✅ TEST 6 PASSED: Resolution is strictly 640px end-to-end, zero 1k overrides!');
+  console.log(`Test 6 Sent to MH resolution: ${sentMhPayload?.resolution}, Status API resolution: ${t6Poll.data?.resolution}, Credits: ${t6Poll.data?.billing?.actual_credits}, output_data_url prefix: ${t6Poll.data?.output_data_url?.substring(0, 23)}`);
+  if (
+    sentMhPayload?.resolution === '640px' &&
+    t6Poll.data?.resolution === '640px' &&
+    t6Poll.data?.billing?.actual_credits === 10 &&
+    t6Poll.data?.output_data_url?.startsWith('data:image/jpeg;base64,')
+  ) {
+    console.log('✅ TEST 6 PASSED: Resolution is strictly 640px (10 credits) and output_data_url is embedded!');
   } else {
-    console.error('❌ TEST 6 FAILED: Resolution mismatch', { sent: sentMhPayload?.resolution, received: t6Poll.data?.resolution });
+    console.error('❌ TEST 6 FAILED: Resolution or output_data_url mismatch', {
+      sent: sentMhPayload?.resolution,
+      received: t6Poll.data?.resolution,
+      credits: t6Poll.data?.billing?.actual_credits,
+      output_data_url: t6Poll.data?.output_data_url
+    });
     process.exit(1);
   }
 
-  // TEST 7: Image Upload Self-Contained Thumbnail Verification
-  console.log('\n[Test 7] Image upload safeguard: Verify POST /api/rooms/:id/assets returns valid data URL');
+  // TEST 7: Image Upload Self-Contained Thumbnail Verification (JSON base64 payload)
+  console.log('\n[Test 7] Base64 JSON upload: Verify POST /api/rooms/:id/assets uploads cleanly and returns data URL');
   globalThis.fetch = async (url, options) => {
     if (url.includes('api.magichour.ai/v1/files/upload-urls')) {
       return {
@@ -236,28 +255,62 @@ async function runTests() {
       };
     }
     if (url.includes('s3.amazonaws.com/mock-put-url')) {
-      return { ok: true };
+      return { ok: true, status: 200 };
     }
     return originalFetch(url, options);
   };
 
-  const dummyJpegBuffer = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00]);
+  const dummyJpegBase64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00]).toString('base64');
   const t7Upload = await runHandler('POST', '/api/rooms/rm_test_kitchen/assets', {
     authorization: 'Bearer valid_mh_key',
-    'content-type': 'image/jpeg'
-  }, dummyJpegBuffer);
+    'content-type': 'application/json'
+  }, {
+    data_url: `data:image/jpeg;base64,${dummyJpegBase64}`,
+    filename: 'dorm_photo.jpg',
+    mime_type: 'image/jpeg'
+  });
 
   globalThis.fetch = originalFetch;
 
-  console.log(`Test 7 status: ${t7Upload.status}, thumbnail_url prefix: ${t7Upload.data?.thumbnail_url?.substring(0, 25)}`);
-  if (t7Upload.status === 201 && t7Upload.data?.thumbnail_url?.startsWith('data:image/jpeg;base64,')) {
-    console.log('✅ TEST 7 PASSED: Thumbnail is self-contained base64 data URL, never 403 on S3 GET!');
+  console.log(`Test 7 status: ${t7Upload.status}, file_path: ${t7Upload.data?.file_path}, thumbnail_url prefix: ${t7Upload.data?.thumbnail_url?.substring(0, 25)}`);
+  if (t7Upload.status === 201 && t7Upload.data?.file_path === 'uploads/room_clean_photo.jpg' && t7Upload.data?.thumbnail_url?.startsWith('data:image/jpeg;base64,')) {
+    console.log('✅ TEST 7 PASSED: Base64 JSON upload succeeded and returned self-contained data URL!');
   } else {
-    console.error('❌ TEST 7 FAILED: Invalid thumbnail', t7Upload);
+    console.error('❌ TEST 7 FAILED: Invalid upload response', t7Upload);
     process.exit(1);
   }
 
-  console.log('\n🎉 ALL 7 TESTS PASSED SUCCESSFULLY! ZERO ERRORS DETECTED.');
+  // TEST 8: Unsupported File Format Rejection (e.g. .gif or .pdf)
+  console.log('\n[Test 8] Unsupported file format check: Verify .gif / .pdf is rejected according to Magic Hour rules');
+  const t8Unsupported = await runHandler('POST', '/api/rooms/rm_test_kitchen/assets', {
+    authorization: 'Bearer valid_mh_key',
+    'content-type': 'application/json'
+  }, {
+    data_url: `data:image/gif;base64,${dummyJpegBase64}`,
+    filename: 'animated_room.gif',
+    mime_type: 'image/gif'
+  });
+  console.log(`Test 8 status: ${t8Unsupported.status}, code: ${t8Unsupported.data?.error?.code}, message: ${t8Unsupported.data?.error?.message}`);
+  if (t8Unsupported.status === 400 && t8Unsupported.data?.error?.code === 'unsupported_format') {
+    console.log('✅ TEST 8 PASSED: Unsupported format rejected with clear user-facing error message!');
+  } else {
+    console.error('❌ TEST 8 FAILED: Did not reject unsupported format', t8Unsupported);
+    process.exit(1);
+  }
+
+  // TEST 9: Project always has default workspace (no empty Rooms[] screen)
+  console.log('\n[Test 9] Default workspace check: Verify GET /api/projects/:id always includes workspace');
+  const t9Project = await runHandler('GET', '/api/projects/proj_cold_start_999');
+  console.log(`Test 9 status: ${t9Project.status}, rooms length: ${t9Project.data?.rooms?.length}`);
+  if (t9Project.status === 200 && Array.isArray(t9Project.data?.rooms) && t9Project.data.rooms.length >= 1) {
+    console.log('✅ TEST 9 PASSED: Project always has a default workspace, never shows empty Rooms screen!');
+  } else {
+    console.error('❌ TEST 9 FAILED: Project returned empty rooms', t9Project);
+    process.exit(1);
+  }
+
+  console.log('\n🎉 ALL 9 TESTS PASSED SUCCESSFULLY! ZERO ERRORS DETECTED.');
 }
 
 runTests();
+

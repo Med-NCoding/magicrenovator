@@ -245,6 +245,8 @@ export interface GenerationSnapshotResponse {
   source_asset_url?: string | null;
   output_asset_id?: string | null;
   output_asset_url?: string | null;
+  output_url?: string | null;
+  output_data_url?: string | null;
   brief_outdated: boolean;
   estimated_credits: number;
   observed_credits_charged?: number | null;
