@@ -252,7 +252,11 @@ export const apiClient = {
     });
   },
 
-  async startGeneration(quoteId: string, requestKey: string): Promise<GenerationAdmissionResponse> {
+  async startGeneration(
+    quoteId: string,
+    requestKey: string,
+    options?: { kind?: 'image' | 'video'; resolution?: string | null; model?: string | null }
+  ): Promise<GenerationAdmissionResponse> {
     const response = await fetch('/api/generations', {
       method: 'POST',
       credentials: 'same-origin',
@@ -263,6 +267,9 @@ export const apiClient = {
       body: JSON.stringify({
         quote_id: quoteId,
         idempotency_key: requestKey,
+        kind: options?.kind,
+        resolution: options?.resolution,
+        model: options?.model,
       }),
     });
     if (!response.ok) throw await readSafeAppError(response);

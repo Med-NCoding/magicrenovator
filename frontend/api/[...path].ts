@@ -88,6 +88,7 @@ const roomsStore = new Map<string, Room>();
 const assetsStore = new Map<string, Asset>();
 const briefsStore = new Map<string, Brief>();
 const jobsStore = new Map<string, Job>();
+const quotesStore = new Map<string, { quote_id: string; kind: 'image' | 'video'; model: string; resolution: string }>();
 
 function extractKey(req: IncomingMessage): string | null {
   const cookieHeader = req.headers.cookie || '';
@@ -635,16 +636,20 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         } catch {}
       }
 
-      return sendJson(res, 200, {
+      const model = kind === 'image' ? (body.model || 'qwen-edit') : (body.model || 'kling-v1');
+      const qualityLabel = body.options?.quality_label || (kind === 'image' ? 'Draft' : 'Draft');
+      const resolution = body.options?.resolution || (kind === 'image' ? '640px' : '480p');
+
+      const quote = {
         quote_id: quoteId,
         id: quoteId,
         kind,
         brief_revision_id: briefId,
         brief_id: briefId,
         source_asset_id: room?.primary_asset_id || 'ast_default',
-        model: kind === 'image' ? (body.model || 'qwen-edit') : (body.model || 'kling-v1'),
-        quality_label: body.options?.quality_label || (kind === 'image' ? 'Presentation' : 'Draft'),
-        resolution: body.options?.resolution || (kind === 'image' ? '1k' : '720p'),
+        model,
+        quality_label: qualityLabel,
+        resolution,
         image_count: 1,
         duration_seconds: body.options?.duration_seconds || 5,
         audio: false,
@@ -659,7 +664,16 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         catalog_version: 'cat_v1',
         expires_at: new Date(Date.now() + 300000).toISOString(),
         requires_confirmation: true
+      };
+
+      quotesStore.set(quoteId, {
+        quote_id: quoteId,
+        kind,
+        model,
+        resolution
       });
+
+      return sendJson(res, 200, quote);
     }
 
     // 7. /api/generations
@@ -700,6 +714,36 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         const body = await parseJsonBody(req);
         const jobId = `gen_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
+        const quote = body.quote_id ? quotesStore.get(body.quote_id) : undefined;
+        const isVideo = (body.kind === 'video') || (quote?.kind === 'video');
+
+        // Check account tier dynamically from Magic Hour
+        let userTier = 'free';
+        try {
+          const accRes = await fetch('https://api.magichour.ai/v1/account', {
+            headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' }
+          });
+          if (accRes.ok) {
+            const acc = await accRes.json();
+            if (acc.tier) userTier = String(acc.tier).toLowerCase();
+          }
+        } catch {}
+
+        // Resolve resolution strictly matching what was selected:
+        let reqResolution = body.resolution || quote?.resolution || (isVideo ? '480p' : '640px');
+
+        // Free tier safeguard: Magic Hour API rejects 1k / 2k on free accounts
+        if (userTier === 'free') {
+          if (!isVideo && reqResolution !== '640px') {
+            reqResolution = '640px';
+          }
+          if (isVideo && reqResolution !== '480p') {
+            reqResolution = '480p';
+          }
+        }
+
+        const modelToUse = body.model || quote?.model || (isVideo ? 'kling-v1' : 'qwen-edit');
+
         // Look up latest brief and photo file_path
         let latestBrief = Array.from(briefsStore.values()).pop();
         let prompt = latestBrief?.compiled_prompt || 'modern bright renovated interior, high quality architecture';
@@ -707,7 +751,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         let filePath = latestAsset?.file_path || 'uploads/default_room.jpg';
 
         try {
-          const isVideo = body.kind === 'video';
           let mhRes: Response;
 
           if (!isVideo) {
@@ -720,8 +763,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
               },
               body: JSON.stringify({
                 name: `MR_${Date.now()}`,
-                model: 'qwen-edit',
-                resolution: '1k',
+                model: modelToUse,
+                resolution: reqResolution,
                 style: { prompt },
                 assets: { image_file_paths: [filePath] }
               })
@@ -737,8 +780,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
               },
               body: JSON.stringify({
                 name: `MR_${Date.now()}`,
-                model: 'kling-v1',
-                resolution: '720p',
+                model: modelToUse,
+                resolution: reqResolution,
                 end_seconds: 5,
                 style: { prompt: videoPrompt },
                 assets: { image_file_path: filePath }

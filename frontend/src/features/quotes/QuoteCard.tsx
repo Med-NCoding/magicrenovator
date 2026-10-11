@@ -139,7 +139,11 @@ export function QuoteCard({
     setError(null);
     try {
       const idempotencyKey = `idemp_${quote.quote_id}`;
-      const admission = await apiClient.startGeneration(quote.quote_id, idempotencyKey);
+      const admission = await apiClient.startGeneration(quote.quote_id, idempotencyKey, {
+        kind: quote.kind,
+        resolution: quote.resolution,
+        model: quote.model,
+      });
       const confirmedQuote = quote;
       setQuote(null);
       onJobStarted(admission, confirmedQuote);
@@ -244,7 +248,9 @@ export function QuoteCard({
                 }}
               >
                 <option value="640px">640px</option>
-                <option value="1k">1k (Standard)</option>
+                <option value="1k" disabled={isFreeTier}>
+                  1k {isFreeTier ? '(Paid Tier)' : '(Standard)'}
+                </option>
                 <option value="2k" disabled={isFreeTier}>
                   2k {isFreeTier ? '(Paid Tier)' : ''}
                 </option>
