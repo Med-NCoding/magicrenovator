@@ -194,11 +194,12 @@ export const apiClient = {
   },
 
   async uploadRoomPhoto(roomId: string, file: File): Promise<AssetMetadataResponse> {
-    const form = new FormData();
-    form.append('file', file);
     return requestJson<AssetMetadataResponse>(`/api/rooms/${encodeURIComponent(roomId)}/assets`, {
       method: 'POST',
-      body: form,
+      headers: {
+        'Content-Type': file.type || 'image/jpeg',
+      },
+      body: file,
     });
   },
 

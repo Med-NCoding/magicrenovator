@@ -129,6 +129,37 @@ function parseRawBody(req: IncomingMessage): Promise<Buffer> {
   });
 }
 
+function extractFileBytes(buffer: Buffer, contentType?: string): Buffer {
+  if (!contentType || !contentType.includes('multipart/form-data')) {
+    return buffer;
+  }
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  const boundaryStr = boundaryMatch ? (boundaryMatch[1] || boundaryMatch[2]) : null;
+
+  const crlfIndex = buffer.indexOf('\r\n\r\n');
+  const lfIndex = buffer.indexOf('\n\n');
+  const headerEnd = crlfIndex !== -1 ? crlfIndex + 4 : (lfIndex !== -1 ? lfIndex + 2 : -1);
+  if (headerEnd === -1) return buffer;
+
+  let fileData = buffer.subarray(headerEnd);
+
+  if (boundaryStr) {
+    const boundaryBuffer = Buffer.from(`--${boundaryStr}`);
+    const lastBoundaryIndex = fileData.lastIndexOf(boundaryBuffer);
+    if (lastBoundaryIndex !== -1) {
+      let end = lastBoundaryIndex;
+      if (end >= 2 && fileData[end - 2] === 13 && fileData[end - 1] === 10) {
+        end -= 2;
+      } else if (end >= 1 && fileData[end - 1] === 10) {
+        end -= 1;
+      }
+      fileData = fileData.subarray(0, end);
+    }
+  }
+
+  return fileData;
+}
+
 function sendJson(res: ServerResponse, status: number, data: any) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json');
@@ -393,9 +424,15 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           return sendError(res, 401, 'not_connected', 'Please connect your Magic Hour key first.');
         }
 
-        const rawBytes = await parseRawBody(req);
-        if (rawBytes.length === 0) {
+        const rawBuffer = await parseRawBody(req);
+        const fileBytes = extractFileBytes(rawBuffer, req.headers['content-type']);
+        if (fileBytes.length === 0) {
           return sendError(res, 400, 'invalid_upload', 'Empty photo upload received.');
+        }
+
+        let extension = 'jpg';
+        if (fileBytes[0] === 0x89 && fileBytes[1] === 0x50 && fileBytes[2] === 0x4e && fileBytes[3] === 0x47) {
+          extension = 'png';
         }
 
         try {
@@ -408,7 +445,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
               Accept: 'application/json'
             },
             body: JSON.stringify({
-              items: [{ type: 'image', extension: 'jpg' }]
+              items: [{ type: 'image', extension }]
             })
           });
 
@@ -422,11 +459,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
             return sendError(res, 502, 'upload_failed', 'Malformed upload response from Magic Hour.');
           }
 
-          // Upload raw bytes to Magic Hour signed URL
+          // Upload raw clean image bytes to Magic Hour signed URL
           await fetch(firstItem.upload_url, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/octet-stream' },
-            body: rawBytes
+            headers: { 'Content-Type': extension === 'png' ? 'image/png' : 'image/jpeg' },
+            body: fileBytes
           });
 
           const assetId = `ast_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -435,8 +472,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
             room_id: roomId,
             project_id: 'default',
             role: 'original_photo',
-            mime_type: 'image/jpeg',
-            bytes_size: rawBytes.length,
+            mime_type: extension === 'png' ? 'image/png' : 'image/jpeg',
+            bytes_size: fileBytes.length,
             width: 1280,
             height: 720,
             thumbnail_url: firstItem.upload_url,
