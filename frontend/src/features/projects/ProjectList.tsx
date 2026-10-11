@@ -70,7 +70,12 @@ export function ProjectList() {
       const updated = [created, ...projects.filter((p) => p.id !== created.id)];
       setProjects(updated);
       saveProjectsToStorage(updated);
-      localStorage.setItem(`mr_project_name_${created.id}`, trimmed);
+      try {
+        localStorage.setItem(`mr_project_name_${created.id}`, trimmed);
+        localStorage.removeItem('mr_photo_preview_latest');
+        localStorage.removeItem(`mr_photo_preview_${created.id}`);
+        localStorage.removeItem(`mr_file_path_${created.id}`);
+      } catch {}
       setNewProjectName('');
       navigate(`/app/projects/${created.id}`);
     } catch (err) {
@@ -82,6 +87,17 @@ export function ProjectList() {
     const updated = projects.filter((p) => p.id !== projectId);
     setProjects(updated);
     saveProjectsToStorage(updated);
+    try {
+      localStorage.removeItem(`mr_project_name_${projectId}`);
+      localStorage.removeItem(`mr_photo_preview_${projectId}`);
+      localStorage.removeItem(`mr_file_path_${projectId}`);
+      localStorage.removeItem(`mr_brief_prompt_${projectId}`);
+      localStorage.removeItem(`mr_output_url_${projectId}`);
+      localStorage.removeItem(`mr_output_data_${projectId}`);
+      localStorage.removeItem(`mr_approved_${projectId}`);
+      localStorage.removeItem(`mr_active_job_${projectId}`);
+      localStorage.removeItem('mr_photo_preview_latest');
+    } catch {}
     try {
       await apiClient.deleteProject(projectId);
     } catch {

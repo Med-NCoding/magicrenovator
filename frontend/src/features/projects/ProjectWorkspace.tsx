@@ -70,18 +70,16 @@ export function ProjectWorkspace() {
     return 'Renovation Workspace';
   });
 
-  // 1. Photo state
-  const [originalPhotoUrl, setOriginalPhotoUrl] = useState<string | null>(() => {
-    if (typeof window === 'undefined') return null;
-    return (
-      localStorage.getItem(`mr_photo_preview_${workspaceId}`) ||
-      localStorage.getItem('mr_photo_preview_latest') ||
-      null
-    );
-  });
+  // 1. Photo state (strictly isolated per project workspaceId — never reuse another project's photo)
   const [filePath, setFilePath] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null;
     return localStorage.getItem(`mr_file_path_${workspaceId}`) || null;
+  });
+  const [originalPhotoUrl, setOriginalPhotoUrl] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const savedPath = localStorage.getItem(`mr_file_path_${workspaceId}`);
+    if (!savedPath) return null;
+    return localStorage.getItem(`mr_photo_preview_${workspaceId}`) || null;
   });
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -127,6 +125,38 @@ export function ProjectWorkspace() {
   const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
 
   const resultSectionRef = useRef<HTMLDivElement>(null);
+
+  // Reset and isolate state whenever switching to a different project workspaceId
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.removeItem('mr_photo_preview_latest');
+    } catch {}
+    const savedName = localStorage.getItem(`mr_project_name_${workspaceId}`) || 'Renovation Workspace';
+    const savedPath = localStorage.getItem(`mr_file_path_${workspaceId}`) || null;
+    const savedPhoto = savedPath ? localStorage.getItem(`mr_photo_preview_${workspaceId}`) || null : null;
+    const savedPrompt = localStorage.getItem(`mr_brief_prompt_${workspaceId}`) || '';
+    const savedJobId = localStorage.getItem(`mr_active_job_${workspaceId}`) || null;
+    const savedProviderId = savedJobId ? localStorage.getItem(`mr_provider_id_${savedJobId}`) : null;
+    const savedOutData = localStorage.getItem(`mr_output_data_${workspaceId}`);
+    const savedOutUrl = localStorage.getItem(`mr_output_url_${workspaceId}`);
+    const savedApproved = localStorage.getItem(`mr_approved_${workspaceId}`) === '1';
+
+    setProjectName(savedName);
+    setFilePath(savedPath);
+    setOriginalPhotoUrl(savedPhoto);
+    setUploadingPhoto(false);
+    setUploadError(null);
+    setPrompt(savedPrompt);
+    setActiveJobId(savedJobId);
+    setProviderId(savedProviderId);
+    setJobState(null);
+    setGenError(null);
+    setOutputDisplayUrl(savedOutData || savedOutUrl || null);
+    setOutputRawUrl(savedOutUrl || null);
+    setIsApproved(savedApproved);
+    setDownloadNotice(null);
+  }, [workspaceId]);
 
   // Load project title if available
   useEffect(() => {
@@ -276,7 +306,7 @@ export function ProjectWorkspace() {
       return;
     }
 
-    // Read local preview immediately so the user always sees their photo
+    // Read local preview immediately so the user always sees their photo for this project
     const reader = new FileReader();
     reader.onload = (ev) => {
       const dataUrl = ev.target?.result as string;
@@ -284,7 +314,6 @@ export function ProjectWorkspace() {
         setOriginalPhotoUrl(dataUrl);
         try {
           localStorage.setItem(`mr_photo_preview_${workspaceId}`, dataUrl);
-          localStorage.setItem('mr_photo_preview_latest', dataUrl);
         } catch {}
       }
     };
@@ -303,7 +332,6 @@ export function ProjectWorkspace() {
         setOriginalPhotoUrl(uploaded.thumbnail_url);
         try {
           localStorage.setItem(`mr_photo_preview_${workspaceId}`, uploaded.thumbnail_url);
-          localStorage.setItem('mr_photo_preview_latest', uploaded.thumbnail_url);
         } catch {}
       }
     } catch (err) {
@@ -316,6 +344,10 @@ export function ProjectWorkspace() {
       setUploadingPhoto(false);
     }
   };
+
+  const isPaidTierResolution =
+    (kind === 'image' && (resolution === '1k' || resolution === '2k')) ||
+    (kind === 'video' && resolution === '720p');
 
   const estimatedCredits =
     kind === 'video'
@@ -335,6 +367,15 @@ export function ProjectWorkspace() {
     if (!connection?.connected) {
       openConnectModal();
       setGenError('Please connect your Magic Hour API key first.');
+      return;
+    }
+
+    if (isPaidTierResolution) {
+      setGenError(
+        `You do not have the Magic Hour paid subscription tier, so ${resolution} resolution cannot be used. Please select ${
+          kind === 'image' ? '640px (10 Credits)' : '480p (120 Credits)'
+        } so you do not waste your credits.`
+      );
       return;
     }
 
@@ -556,29 +597,44 @@ export function ProjectWorkspace() {
                   id="output-resolution"
                   className="select-input"
                   value={resolution}
-                  onChange={(e) => setResolution(e.target.value)}
+                  onChange={(e) => {
+                    setResolution(e.target.value);
+                    setGenError(null);
+                  }}
                   disabled={isJobRunning}
                 >
-                  <option value="640px">640px (10 Credits)</option>
-                  <option value="1k">1k (20 Credits)</option>
-                  <option value="2k">2k (40 Credits)</option>
+                  <option value="640px">640px (10 Credits &mdash; Free &amp; Paid Tier)</option>
+                  <option value="1k">1k (20 Credits &mdash; Paid Tier Only)</option>
+                  <option value="2k">2k (40 Credits &mdash; Paid Tier Only)</option>
                 </select>
               ) : (
                 <select
                   id="output-resolution"
                   className="select-input"
                   value={resolution}
-                  onChange={(e) => setResolution(e.target.value)}
+                  onChange={(e) => {
+                    setResolution(e.target.value);
+                    setGenError(null);
+                  }}
                   disabled={isJobRunning}
                 >
-                  <option value="480p">480p (120 Credits)</option>
-                  <option value="720p">720p (240 Credits)</option>
+                  <option value="480p">480p (120 Credits &mdash; Free &amp; Paid Tier)</option>
+                  <option value="720p">720p (240 Credits &mdash; Paid Tier Only)</option>
                 </select>
               )}
             </div>
           </div>
 
-          {genError && (
+          {isPaidTierResolution && (
+            <div className="alert alert-error" role="alert" style={{ marginBottom: '14px' }}>
+              <strong>Paid Tier Required:</strong> You do not have the Magic Hour paid subscription tier, so{' '}
+              <strong>{resolution}</strong> resolution cannot be used. Please select{' '}
+              <strong>{kind === 'image' ? '640px (10 Credits)' : '480p (120 Credits)'}</strong> so you don&apos;t waste
+              your credits.
+            </div>
+          )}
+
+          {genError && !isPaidTierResolution && (
             <div className="alert alert-error" role="alert" style={{ marginBottom: '14px' }}>
               {genError}
             </div>
