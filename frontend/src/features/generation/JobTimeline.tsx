@@ -40,12 +40,22 @@ export function JobTimeline({ jobId, onJobUpdated }: JobTimelineProps) {
   useEffect(() => {
     let active = true;
     let timer: number | undefined;
+    let consecutiveErrors = 0;
 
     const pollLoop = async () => {
       if (!active) return;
       const snap = await fetchSnapshot();
-      if (active && snap && ACTIVE_STATES.has(snap.state)) {
-        timer = window.setTimeout(pollLoop, 1000);
+      if (!active) return;
+      if (snap) {
+        consecutiveErrors = 0;
+        if (ACTIVE_STATES.has(snap.state)) {
+          timer = window.setTimeout(pollLoop, 1500);
+        }
+      } else {
+        consecutiveErrors++;
+        if (consecutiveErrors <= 5) {
+          timer = window.setTimeout(pollLoop, 2000);
+        }
       }
     };
 

@@ -86,6 +86,7 @@ export interface RoomSummary {
   accepted_clip_url?: string | null;
   accepted_clip_review_id?: string | null;
   latest_job_id?: string | null;
+  file_path?: string | null;
 }
 
 export interface ProjectSummary {
@@ -129,6 +130,7 @@ export interface AssetMetadataResponse {
   advisory_message?: string | null;
   thumbnail_url: string;
   download_url: string;
+  file_path?: string;
   annotations: RoomAnnotation[];
   created_at: string;
 }

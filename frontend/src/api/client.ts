@@ -256,7 +256,14 @@ export const apiClient = {
   async startGeneration(
     quoteId: string,
     requestKey: string,
-    options?: { kind?: 'image' | 'video'; resolution?: string | null; model?: string | null }
+    options?: {
+      kind?: 'image' | 'video';
+      resolution?: string | null;
+      model?: string | null;
+      file_path?: string | null;
+      prompt?: string | null;
+      room_id?: string | null;
+    }
   ): Promise<GenerationAdmissionResponse> {
     const response = await fetch('/api/generations', {
       method: 'POST',
@@ -271,6 +278,9 @@ export const apiClient = {
         kind: options?.kind,
         resolution: options?.resolution,
         model: options?.model,
+        file_path: options?.file_path,
+        prompt: options?.prompt,
+        room_id: options?.room_id,
       }),
     });
     if (!response.ok) throw await readSafeAppError(response);

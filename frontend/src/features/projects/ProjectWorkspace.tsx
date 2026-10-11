@@ -133,7 +133,10 @@ export function ProjectWorkspace() {
 
   const handleUploadPhoto = async (file: File) => {
     if (!project || !activeRoom) return;
-    await apiClient.uploadRoomPhoto(activeRoom.id, file);
+    const uploadedAsset = await apiClient.uploadRoomPhoto(activeRoom.id, file);
+    if (uploadedAsset?.file_path) {
+      localStorage.setItem(`mr_file_path_${activeRoom.id}`, uploadedAsset.file_path);
+    }
     await reloadProjectAndRoomState(project.id, activeRoom.id);
   };
 
@@ -147,6 +150,9 @@ export function ProjectWorkspace() {
     if (!project || !activeRoom) return;
     const isRevision = Boolean(activeBrief && jobSnapshot);
     const rev = await apiClient.saveRoomBrief(activeRoom.id, payload);
+    if (rev?.compiled_prompt) {
+      localStorage.setItem(`mr_brief_prompt_${activeRoom.id}`, rev.compiled_prompt);
+    }
     setActiveBrief(rev);
     await reloadProjectAndRoomState(project.id, activeRoom.id);
     if (isRevision && !rev.has_unresolved_conflicts) {
@@ -188,6 +194,9 @@ export function ProjectWorkspace() {
           'room finish',
         ],
       });
+      if (rev?.compiled_prompt) {
+        localStorage.setItem(`mr_brief_prompt_${activeRoom.id}`, rev.compiled_prompt);
+      }
       setActiveBrief(rev);
       await reloadProjectAndRoomState(project.id, activeRoom.id);
       return rev;

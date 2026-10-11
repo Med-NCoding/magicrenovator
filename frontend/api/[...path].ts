@@ -487,7 +487,13 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           if (room) {
             room.primary_asset_id = assetId;
             room.thumbnail_url = firstItem.upload_url;
+            room.file_path = firstItem.file_path;
           }
+
+          res.setHeader('Set-Cookie', [
+            `mr_last_photo_path=${encodeURIComponent(firstItem.file_path)}; Path=/; SameSite=Lax; Max-Age=86400`,
+            `mr_photo_${roomId}=${encodeURIComponent(firstItem.file_path)}; Path=/; SameSite=Lax; Max-Age=86400`
+          ]);
 
           return sendJson(res, 201, asset);
         } catch (err: any) {
@@ -783,9 +789,35 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
         // Look up latest brief and photo file_path
         let latestBrief = Array.from(briefsStore.values()).pop();
-        let prompt = latestBrief?.compiled_prompt || 'modern bright renovated interior, high quality architecture';
-        let latestAsset = Array.from(assetsStore.values()).find((a) => a.role === 'original_photo');
-        let filePath = latestAsset?.file_path || 'uploads/default_room.jpg';
+        let prompt = body.prompt || latestBrief?.compiled_prompt || 'modern bright renovated interior, high quality architecture';
+
+        let filePath = body.file_path;
+        if (!filePath) {
+          const cookieHeader = req.headers.cookie || '';
+          if (body.room_id) {
+            const roomMatch = cookieHeader.match(new RegExp(`mr_photo_${body.room_id}=([^;]+)`));
+            if (roomMatch) filePath = decodeURIComponent(roomMatch[1]);
+          }
+          if (!filePath) {
+            const lastPhotoMatch = cookieHeader.match(/mr_last_photo_path=([^;]+)/);
+            if (lastPhotoMatch) filePath = decodeURIComponent(lastPhotoMatch[1]);
+          }
+        }
+        if (!filePath) {
+          let latestAsset = Array.from(assetsStore.values()).find((a) => a.role === 'original_photo');
+          filePath = latestAsset?.file_path;
+        }
+
+        // CRITICAL: NEVER pass fake dummy paths like 'uploads/default_room.jpg'!
+        // If no photo has been uploaded, reject immediately so NO credits are wasted!
+        if (!filePath || filePath === 'uploads/default_room.jpg') {
+          return sendError(
+            res,
+            400,
+            'missing_photo',
+            'No room photo found. Please upload a clear photo of your room in Step 1 first.'
+          );
+        }
 
         try {
           let mhRes: Response;
@@ -829,16 +861,17 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           if (!mhRes.ok) {
             const errData = await mhRes.json().catch(() => ({}));
             const code = errData.code || 'provider_rejected';
-            const msg = errData.message || 'Magic Hour rejected generation request.';
+            const msg = errData.message || (typeof errData.error === 'string' ? errData.error : errData.error?.message) || 'Magic Hour rejected generation request.';
             return sendError(res, mhRes.status, code, msg);
           }
 
           const mhData = await mhRes.json();
+          const targetRoomId = body.room_id || latestBrief?.room_id || 'default';
           const job: Job = {
             id: jobId,
             provider_id: mhData.id,
             project_id: 'default',
-            room_id: latestBrief?.room_id || 'default',
+            room_id: targetRoomId,
             kind: isVideo ? 'video' : 'image',
             state: 'queued',
             provider_state: 'queued',
@@ -847,10 +880,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           };
           jobsStore.set(jobId, job);
 
-          res.setHeader(
-            'Set-Cookie',
-            `mr_last_job=${jobId}:${mhData.id}:${isVideo ? 'video' : 'image'}:${latestBrief?.room_id || 'default'}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7200`
-          );
+          res.setHeader('Set-Cookie', [
+            `mr_last_job=${jobId}:${mhData.id}:${isVideo ? 'video' : 'image'}:${targetRoomId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7200`,
+            `mr_job_${jobId}=${mhData.id}:${isVideo ? 'video' : 'image'}:${targetRoomId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7200`
+          ]);
 
           return sendJson(res, 200, {
             job_id: jobId,
@@ -876,23 +909,41 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         // Fallback for serverless cold start: check cookie or look up project from Magic Hour
         if (!job && key) {
           const cookieHeader = req.headers.cookie || '';
-          const match = cookieHeader.match(/mr_last_job=([^;]+)/);
+          let match = cookieHeader.match(new RegExp(`mr_job_${jobId}=([^;]+)`));
           if (match) {
-            const [cJobId, cProvId, cKind, cRoomId] = match[1].split(':');
-            if (cJobId === jobId) {
-              const restoredJob: Job = {
-                id: jobId,
-                provider_id: cProvId,
-                project_id: 'default',
-                room_id: cRoomId || 'default',
-                kind: cKind === 'video' ? 'video' : 'image',
-                state: 'rendering',
-                provider_state: 'rendering',
-                prompt: 'modern bright renovated interior',
-                created_at: new Date().toISOString()
-              };
-              job = restoredJob;
-              jobsStore.set(jobId, restoredJob);
+            const [cProvId, cKind, cRoomId] = match[1].split(':');
+            const restoredJob: Job = {
+              id: jobId,
+              provider_id: cProvId,
+              project_id: 'default',
+              room_id: cRoomId || 'default',
+              kind: (cKind || 'image') as 'image' | 'video',
+              state: 'rendering',
+              provider_state: 'rendering',
+              prompt: 'modern bright renovated interior',
+              created_at: new Date().toISOString()
+            };
+            job = restoredJob;
+            jobsStore.set(jobId, restoredJob);
+          } else {
+            const lastJobMatch = cookieHeader.match(/mr_last_job=([^;]+)/);
+            if (lastJobMatch) {
+              const [cJobId, cProvId, cKind, cRoomId] = lastJobMatch[1].split(':');
+              if (cJobId === jobId) {
+                const restoredJob: Job = {
+                  id: jobId,
+                  provider_id: cProvId,
+                  project_id: 'default',
+                  room_id: cRoomId || 'default',
+                  kind: (cKind || 'image') as 'image' | 'video',
+                  state: 'rendering',
+                  provider_state: 'rendering',
+                  prompt: 'modern bright renovated interior',
+                  created_at: new Date().toISOString()
+                };
+                job = restoredJob;
+                jobsStore.set(jobId, restoredJob);
+              }
             }
           }
 
@@ -983,6 +1034,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
                 }
               } else if (data.status === 'error') {
                 job.state = 'failed';
+              } else if (data.status === 'canceled') {
+                job.state = 'stopped';
               } else {
                 job.state = data.status === 'queued' ? 'queued' : 'rendering';
               }
@@ -1002,6 +1055,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
                 ? 'Generation complete and ready for review.'
                 : job.state === 'failed'
                 ? 'Magic Hour generation encountered an error.'
+                : job.state === 'stopped'
+                ? 'Magic Hour generation was stopped.'
+                : job.state === 'queued'
+                ? 'Job queued in Magic Hour...'
                 : 'Rendering renovation on Magic Hour...',
             timestamp: new Date().toISOString(),
             payload: {}

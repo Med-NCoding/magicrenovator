@@ -139,10 +139,23 @@ export function QuoteCard({
     setError(null);
     try {
       const idempotencyKey = `idemp_${quote.quote_id}`;
+      const storedFilePath =
+        (typeof window !== 'undefined' ? localStorage.getItem(`mr_file_path_${room.id}`) : null) ||
+        room.file_path ||
+        null;
+      const promptText =
+        briefRevision?.compiled_prompt ||
+        briefRevision?.brief?.raw_request ||
+        (typeof window !== 'undefined' ? localStorage.getItem(`mr_brief_prompt_${room.id}`) : null) ||
+        null;
+
       const admission = await apiClient.startGeneration(quote.quote_id, idempotencyKey, {
         kind: quote.kind,
         resolution: quote.resolution,
         model: quote.model,
+        file_path: storedFilePath,
+        prompt: promptText,
+        room_id: room.id,
       });
       const confirmedQuote = quote;
       setQuote(null);
