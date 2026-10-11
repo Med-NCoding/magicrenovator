@@ -74,7 +74,7 @@ interface Job {
   project_id: string;
   room_id: string;
   kind: 'image' | 'video';
-  state: 'queued' | 'polling_provider' | 'ready_for_review' | 'failed';
+  state: 'queued' | 'rendering' | 'polling_provider' | 'ready_for_review' | 'failed' | 'stopped';
   provider_state: string;
   prompt: string;
   output_asset_id?: string | null;
@@ -880,7 +880,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           if (match) {
             const [cJobId, cProvId, cKind, cRoomId] = match[1].split(':');
             if (cJobId === jobId) {
-              job = {
+              const restoredJob: Job = {
                 id: jobId,
                 provider_id: cProvId,
                 project_id: 'default',
@@ -891,7 +891,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
                 prompt: 'modern bright renovated interior',
                 created_at: new Date().toISOString()
               };
-              jobsStore.set(jobId, job);
+              job = restoredJob;
+              jobsStore.set(jobId, restoredJob);
             }
           }
 
@@ -907,7 +908,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
                   (p: any) => p.name?.includes(jobId) || p.id === jobId || `MR_${jobId}` === p.name
                 ) || (listData.items || [])[0];
                 if (found) {
-                  job = {
+                  const foundJob: Job = {
                     id: jobId,
                     provider_id: found.id,
                     project_id: 'default',
@@ -918,7 +919,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
                     prompt: found.style?.prompt || '',
                     created_at: found.created_at || new Date().toISOString()
                   };
-                  jobsStore.set(jobId, job);
+                  job = foundJob;
+                  jobsStore.set(jobId, foundJob);
                 }
               }
             } catch {}
