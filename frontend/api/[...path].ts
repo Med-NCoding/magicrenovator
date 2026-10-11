@@ -91,6 +91,15 @@ const jobsStore = new Map<string, Job>();
 const quotesStore = new Map<string, { quote_id: string; kind: 'image' | 'video'; model: string; resolution: string }>();
 
 function extractKey(req: IncomingMessage): string | null {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7).trim();
+    if (token) return token;
+  }
+  const customKey = req.headers['x-magic-hour-key'];
+  if (customKey && typeof customKey === 'string' && customKey.trim()) {
+    return customKey.trim();
+  }
   const cookieHeader = req.headers.cookie || '';
   const match = cookieHeader.match(/rp_mh_key=([^;]+)/);
   if (!match) return null;
