@@ -847,6 +847,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           };
           jobsStore.set(jobId, job);
 
+          res.setHeader(
+            'Set-Cookie',
+            `mr_last_job=${jobId}:${mhData.id}:${isVideo ? 'video' : 'image'}:${latestBrief?.room_id || 'default'}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7200`
+          );
+
           return sendJson(res, 200, {
             job_id: jobId,
             id: jobId,
@@ -865,12 +870,65 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       // GET /api/generations/:id (poll)
       if (method === 'GET' && segments.length === 2) {
         const jobId = segments[1];
-        const job = jobsStore.get(jobId);
+        let job = jobsStore.get(jobId);
+        const key = extractKey(req);
+
+        // Fallback for serverless cold start: check cookie or look up project from Magic Hour
+        if (!job && key) {
+          const cookieHeader = req.headers.cookie || '';
+          const match = cookieHeader.match(/mr_last_job=([^;]+)/);
+          if (match) {
+            const [cJobId, cProvId, cKind, cRoomId] = match[1].split(':');
+            if (cJobId === jobId) {
+              job = {
+                id: jobId,
+                provider_id: cProvId,
+                project_id: 'default',
+                room_id: cRoomId || 'default',
+                kind: cKind === 'video' ? 'video' : 'image',
+                state: 'rendering',
+                provider_state: 'rendering',
+                prompt: 'modern bright renovated interior',
+                created_at: new Date().toISOString()
+              };
+              jobsStore.set(jobId, job);
+            }
+          }
+
+          // If still not found, search recent projects on Magic Hour directly
+          if (!job) {
+            try {
+              const listRes = await fetch('https://api.magichour.ai/v1/image-projects', {
+                headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' }
+              });
+              if (listRes.ok) {
+                const listData = await listRes.json();
+                const found = (listData.items || []).find(
+                  (p: any) => p.name?.includes(jobId) || p.id === jobId || `MR_${jobId}` === p.name
+                ) || (listData.items || [])[0];
+                if (found) {
+                  job = {
+                    id: jobId,
+                    provider_id: found.id,
+                    project_id: 'default',
+                    room_id: 'default',
+                    kind: 'image',
+                    state: found.status === 'complete' ? 'ready_for_review' : (found.status === 'error' ? 'failed' : 'rendering'),
+                    provider_state: found.status || 'rendering',
+                    prompt: found.style?.prompt || '',
+                    created_at: found.created_at || new Date().toISOString()
+                  };
+                  jobsStore.set(jobId, job);
+                }
+              }
+            } catch {}
+          }
+        }
+
         if (!job) {
           return sendError(res, 404, 'job_not_found', 'Generation job not found.');
         }
 
-        const key = extractKey(req);
         if (key && job.provider_id && job.state !== 'ready_for_review') {
           const route = job.kind === 'image' ? 'image-projects' : 'video-projects';
           try {
@@ -881,40 +939,50 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
               const data = await mhRes.json();
               job.provider_state = data.status || 'rendering';
 
-              if (data.status === 'complete' && data.downloads?.[0]?.url) {
-                const downloadUrl = data.downloads[0].url;
-                const outputAssetId = `ast_${Date.now()}_out`;
-                const outputAsset: Asset = {
-                  id: outputAssetId,
-                  room_id: job.room_id,
-                  project_id: job.project_id,
-                  role: job.kind === 'image' ? 'generated_image' : 'generated_video',
-                  mime_type: job.kind === 'image' ? 'image/jpeg' : 'video/mp4',
-                  bytes_size: 2048,
-                  width: 1280,
-                  height: 720,
-                  thumbnail_url: downloadUrl,
-                  download_url: downloadUrl,
-                  created_at: new Date().toISOString()
-                };
-                assetsStore.set(outputAssetId, outputAsset);
+              if (data.status === 'complete') {
+                const downloadUrl =
+                  data.downloads?.[0]?.url ||
+                  data.download_url ||
+                  (typeof data.downloads?.[0] === 'string' ? data.downloads[0] : null);
 
-                job.state = 'ready_for_review';
-                job.output_asset_id = outputAssetId;
-                job.output_url = downloadUrl;
+                if (downloadUrl) {
+                  const outputAssetId = `ast_${Date.now()}_out`;
+                  const outputAsset: Asset = {
+                    id: outputAssetId,
+                    room_id: job.room_id,
+                    project_id: job.project_id,
+                    role: job.kind === 'image' ? 'generated_image' : 'generated_video',
+                    mime_type: job.kind === 'image' ? 'image/jpeg' : 'video/mp4',
+                    bytes_size: 2048,
+                    width: 1280,
+                    height: 720,
+                    thumbnail_url: downloadUrl,
+                    download_url: downloadUrl,
+                    created_at: new Date().toISOString()
+                  };
+                  assetsStore.set(outputAssetId, outputAsset);
 
-                const room = roomsStore.get(job.room_id);
-                if (room) {
-                  if (job.kind === 'image') {
-                    room.accepted_image_url = downloadUrl;
-                  } else {
-                    room.accepted_clip_url = downloadUrl;
+                  job.state = 'ready_for_review';
+                  job.output_asset_id = outputAssetId;
+                  job.output_url = downloadUrl;
+
+                  const room = roomsStore.get(job.room_id);
+                  if (room) {
+                    if (job.kind === 'image') {
+                      room.accepted_image_url = downloadUrl;
+                      room.accepted_image_asset_id = outputAssetId;
+                    } else {
+                      room.accepted_clip_url = downloadUrl;
+                      room.accepted_clip_asset_id = outputAssetId;
+                    }
                   }
+                } else {
+                  job.state = 'rendering';
                 }
               } else if (data.status === 'error') {
                 job.state = 'failed';
               } else {
-                job.state = 'polling_provider';
+                job.state = data.status === 'queued' ? 'queued' : 'rendering';
               }
             }
           } catch {

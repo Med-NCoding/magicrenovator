@@ -431,6 +431,7 @@ export function ProjectWorkspace() {
           'queued',
           'rendering',
           'saving_output',
+          'polling_provider',
         ].includes(jobSnapshot.state))
   );
 
@@ -590,13 +591,24 @@ export function ProjectWorkspace() {
               {/* Review & Approved Step: Shown right in front of the user when ready_for_review or accepted */}
               {showReviewAndOutput && (
                 <>
-                  {stillCompareUrl && activeRoom.thumbnail_url && (
+                  {stillCompareUrl && (
                     <div className="card" style={{ marginBottom: '20px' }}>
-                      <ImageCompare
-                        beforeUrl={activeRoom.thumbnail_url}
-                        afterUrl={stillCompareUrl}
-                        roomName={activeRoom.name}
-                      />
+                      {activeRoom?.thumbnail_url ? (
+                        <ImageCompare
+                          beforeUrl={activeRoom.thumbnail_url}
+                          afterUrl={stillCompareUrl}
+                          roomName={activeRoom.name}
+                        />
+                      ) : (
+                        <div style={{ textAlign: 'center', padding: '16px' }}>
+                          <h3 style={{ marginTop: 0 }}>Renovated Photo</h3>
+                          <img
+                            src={stillCompareUrl}
+                            alt={activeRoom?.name || 'Renovated Room'}
+                            style={{ maxWidth: '100%', maxHeight: '520px', borderRadius: '8px', objectFit: 'contain' }}
+                          />
+                        </div>
+                      )}
                       {stillReviewAssetId ? (
                         <ReviewChecklist
                           assetId={stillReviewAssetId}

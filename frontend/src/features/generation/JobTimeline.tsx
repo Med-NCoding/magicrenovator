@@ -14,6 +14,7 @@ const ACTIVE_STATES = new Set([
   'queued',
   'rendering',
   'saving_output',
+  'polling_provider',
 ]);
 
 export function JobTimeline({ jobId, onJobUpdated }: JobTimelineProps) {
